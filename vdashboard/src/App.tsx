@@ -33,16 +33,16 @@ import { useSocket } from "./hooks/useSocket";
  * se nastavuje v souboru `.env` (nebo `.env.local`) jako:
  *   VITE_PROCESSOR_URL=http://muj-server:8000
  *
- * Pokud proměnná není definována (např. při lokálním vývoji bez .env),
- * použije se výchozí hodnota `http://localhost:8000`, kde processor
- * standardně běží.
+ * Pokud proměnná není definována, použije se stejný origin jako dashboard
+ * (`window.location.origin`) a volání jdou přes nginx proxy (`/stream`, `/api`,
+ * `/socket.io`).
  *
  * Prefix `VITE_` je povinný – Vite jiné proměnné do klientského kódu
  * nevkládá (bezpečnostní pravidlo).
  */
 const PROCESSOR_BASE =
   (import.meta.env.VITE_PROCESSOR_URL as string | undefined) ??
-  "http://localhost:8000";
+  window.location.origin;
 
 /**
  * Plná URL adresa MJPEG video streamu.
