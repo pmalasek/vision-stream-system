@@ -130,7 +130,11 @@ async def lifespan(app: FastAPI):
     # --- Inicializace rekordéru videa ---
     # VideoRecorder se stará o ukládání anotovaných snímků / klipů
     # a průběžný zápis metadat detekcí do JSONL souboru.
-    recorder = VideoRecorder(output_dir=config.OUTPUT_DIR)
+    recorder = VideoRecorder(
+        output_dir=config.OUTPUT_DIR,
+        segment_duration_minutes=config.SEGMENT_DURATION_MINUTES,
+        max_segments=config.MAX_SEGMENTS,
+    )
 
     # --- Sestavení VideoProcessoru ---
     # VideoProcessor propojuje zdroj videa, detektor, rekordér a Socket.IO

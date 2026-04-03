@@ -22,6 +22,8 @@ Typické použití::
 import json
 import logging
 import os
+import shutil
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -68,7 +70,12 @@ class VideoRecorder:
     zajistí automatické uvolnění prostředků i v případě výjimky.
     """
 
-    def __init__(self, output_dir: str) -> None:
+    def __init__(
+        self,
+        output_dir: str,
+        segment_duration_minutes: int = 10,
+        max_segments: int = 3,
+    ) -> None:
         """Připraví výstupní adresář pro aktuální nahrávací sezení.
 
         Vytvoří časově označený podadresář ve tvaru ``YYYY-MM-DD_HH-MM-SS``
@@ -78,10 +85,20 @@ class VideoRecorder:
         Soubor s metadaty je otevřen ihned v režimu přidávání (``"a"``),
         zatímco :class:`cv2.VideoWriter` je inicializován až při prvním snímku.
 
+        Po uplynutí *segment_duration_minutes* minut je aktuální segment
+        automaticky uzavřen a otevřen nový. Zachová se nejvýše *max_segments*
+        nejnovějších segmentů; starší jsou smazány.
+
         Args:
-            output_dir: Kořenový adresář, ve kterém bude vytvořen podadresář
-                        pro toto nahrávací sezení.
+            output_dir:                Kořenový adresář pro nahrávací segmenty.
+            segment_duration_minutes:  Délka segmentu v minutách (výchozí 10).
+            max_segments:              Maximální počet uchovaných segmentů (výchozí 3).
         """
+        # Kořenový adresář uchováváme pro zakládání nových segmentů a mazání.
+        self._output_dir = output_dir
+        self._segment_duration_seconds: float = segment_duration_minutes * 60
+        self._max_segments = max_segments
+
         # Vygenerujeme časovou značku pro pojmenování adresáře sezení.
         # Formát je kompatibilní s názvem adresáře na všech platformách
         # (dvojtečky nahrazeny pomlčkami).
@@ -95,6 +112,10 @@ class VideoRecorder:
         # Sestavíme úplné cesty k výstupním souborům.
         self.video_path = os.path.join(self.session_dir, VIDEO_FILENAME)
         self.metadata_path = os.path.join(self.session_dir, METADATA_FILENAME)
+
+        # Časové razítko zahájení aktuálního segmentu – slouží pro detekci
+        # okamžiku rotace.
+        self._segment_start_time: float = time.monotonic()
 
         # VideoWriter je inicializován líně až v metodě write_frame,
         # protože teprve při prvním snímku známe jeho rozměry (výška, šířka).
@@ -139,6 +160,10 @@ class VideoRecorder:
             timestamp:  Čas pořízení snímku jako Unix timestamp (počet sekund
                         od epochy), obvykle vrácený funkcí ``time.time()``.
         """
+        # Zkontrolujeme, zda neuplynula délka segmentu – pokud ano, rotujeme.
+        if time.monotonic() - self._segment_start_time >= self._segment_duration_seconds:
+            self._rotate_segment()
+
         # Pokud ještě nebyl VideoWriter inicializován, uděláme to nyní –
         # rozměry snímku jsou nyní k dispozici.
         if self._writer is None:
@@ -197,6 +222,71 @@ class VideoRecorder:
     # ------------------------------------------------------------------
     # Privátní pomocné metody (Private helpers)
     # ------------------------------------------------------------------
+
+    def _rotate_segment(self) -> None:
+        """Uzavře aktuální segment, otevře nový a odstraní přebytečné staré segmenty.
+
+        Pořadí kroků:
+        1. Uvolní VideoWriter a uzavře soubor s metadaty (volá :meth:`release`).
+        2. Vytvoří nový časově označený podadresář.
+        3. Znovu otevře soubor s metadaty pro nový segment.
+        4. Zavolá :meth:`_prune_old_segments` pro smazání přebytečných segmentů.
+        """
+        logger.info(
+            "Rotating segment after %.0f s → closing '%s'",
+            self._segment_duration_seconds,
+            self.session_dir,
+        )
+
+        # Krok 1 – uzavřeme aktuální soubory (release nastaví _writer na None).
+        self.release()
+
+        # Krok 2 – nový adresář segmentu.
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.session_dir = os.path.join(self._output_dir, timestamp)
+        os.makedirs(self.session_dir, exist_ok=True)
+
+        self.video_path = os.path.join(self.session_dir, VIDEO_FILENAME)
+        self.metadata_path = os.path.join(self.session_dir, METADATA_FILENAME)
+
+        # Krok 3 – otevřeme soubor metadat pro nový segment.
+        self._metadata_file = open(self.metadata_path, "a", encoding="utf-8")  # noqa: WPS515
+
+        # Reset časovače segmentu.
+        self._segment_start_time = time.monotonic()
+
+        logger.info("New segment started → dir='%s'", self.session_dir)
+
+        # Krok 4 – smažeme přebytečné staré segmenty.
+        self._prune_old_segments()
+
+    def _prune_old_segments(self) -> None:
+        """Smaže nejstarší segmenty tak, aby jich zůstalo nejvýše *max_segments*.
+
+        Segmenty jsou identifikovány jako podadresáře kořenového adresáře
+        ``_output_dir``. Řadí se lexikograficky podle názvu – protože název
+        má tvar ``YYYY-MM-DD_HH-MM-SS``, lexikografické řazení odpovídá
+        chronologickému.
+        """
+        try:
+            entries = sorted(
+                [
+                    e.path
+                    for e in os.scandir(self._output_dir)
+                    if e.is_dir()
+                ]
+            )
+        except OSError as exc:
+            logger.warning("Cannot list output dir for pruning: %s", exc)
+            return
+
+        to_delete = entries[: max(0, len(entries) - self._max_segments)]
+        for path in to_delete:
+            try:
+                shutil.rmtree(path)
+                logger.info("Pruned old segment → '%s'", path)
+            except OSError as exc:
+                logger.warning("Failed to delete segment '%s': %s", path, exc)
 
     def _init_writer(self, frame: np.ndarray) -> None:
         """Vytvoří instanci :class:`cv2.VideoWriter` s rozměry odvozenými ze snímku *frame*.

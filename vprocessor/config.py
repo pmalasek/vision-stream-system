@@ -60,6 +60,15 @@ class Config:
     # což je vhodné pro nasazení v kontejneru nebo na vzdáleném serveru.
     HOST: str = os.getenv("HOST", "0.0.0.0")
 
+    # Délka jednoho nahrávacího segmentu v minutách. Po uplynutí této doby
+    # rekordér uzavře aktuální soubory a otevře nový segment.
+    SEGMENT_DURATION_MINUTES: int = int(os.getenv("SEGMENT_DURATION_MINUTES", "10"))
+
+    # Maximální počet uchovaných segmentů (video + metadata).
+    # Starší segmenty jsou automaticky mazány, jakmile jejich počet překročí
+    # tuto hodnotu.
+    MAX_SEGMENTS: int = int(os.getenv("MAX_SEGMENTS", "3"))
+
 
 # Globální instance konfigurace určená k importu napříč celou aplikací.
 # Ostatní moduly by měly importovat tento objekt místo přímého volání os.getenv(),
