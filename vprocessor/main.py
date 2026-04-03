@@ -327,6 +327,7 @@ async def mjpeg_stream():
         # Jakmile should_exit == True, generátor vrátí StopAsyncIteration
         # a StreamingResponse uzavře spojení, čímž odblokuje uvicornův
         # shutdown mechanismus.
+        last_seq = -1
         while _uvicorn_server is None or not _uvicorn_server.should_exit:
             if processor is None:
                 # Procesor ještě není inicializován (startuji) – počkáme.
@@ -334,8 +335,9 @@ async def mjpeg_stream():
                 continue
 
             # Získání posledního anotovaného snímku jako JPEG bytes.
-            frame = processor.get_latest_frame()
-            if frame:
+            frame, seq = processor.get_latest_frame_with_seq()
+            if frame and seq != last_seq:
+                last_seq = seq
                 # Sestavení jedné MJPEG "části" (part):
                 #   --frame\r\n          ← MIME boundary
                 #   Content-Type: ...\r\n ← typ obsahu
@@ -344,10 +346,9 @@ async def mjpeg_stream():
                 #   \r\n                  ← oddělovač před dalším boundary
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
 
-            # Throttling na ~60 FPS (1/60 ≈ 16,7 ms mezi snímky).
-            # Vyšší frame rate zlepšuje hladkost videa i když FPS strojů je nižší;
-            # browser interpoluje chybějící snímky a stream vypadá plynuleji.
-            await asyncio.sleep(1 / 60)
+            # Pokud nový snímek není k dispozici, krátce počkáme a zkusíme znovu.
+            # Nízká prodleva drží latenci nízko bez zbytečného CPU spin-loop.
+            await asyncio.sleep(0.005)
 
     return StreamingResponse(
         generate(),

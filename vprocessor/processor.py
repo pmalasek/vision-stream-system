@@ -181,6 +181,9 @@ class VideoProcessor:
         self._frame_lock = threading.Lock()
         # Poslední JPEG-zakódovaný snímek (bytes) nebo None, dokud žádný nepřišel.
         self.latest_frame: bytes | None = None
+        # Monotonní sekvenční číslo latest_frame; inkrementuje se při každém
+        # úspěšném zápisu nového JPEG snímku.
+        self._latest_frame_seq: int = 0
 
         # ── Pomocné stavové proměnné ───────────────────────────────────────
         # Poslední seznam detekcí (sdíleno s HTTP endpointy).
@@ -340,6 +343,19 @@ class VideoProcessor:
         """
         with self._frame_lock:
             return self.latest_frame
+
+    def get_latest_frame_with_seq(self) -> tuple[bytes | None, int]:
+        """Vrátí nejnovější JPEG snímek a jeho sekvenční číslo (thread-safe).
+
+        Returns
+        -------
+        tuple[bytes | None, int]
+            Dvojice ``(frame_bytes, seq)``.
+            - ``frame_bytes`` je JPEG obsah nebo ``None``.
+            - ``seq`` je monotonně rostoucí čítač změn snímku.
+        """
+        with self._frame_lock:
+            return self.latest_frame, self._latest_frame_seq
 
     # ──────────────────────────────────────────────────────────────────────────
     # Interní metody – spouštěné v pracovních vláknech ThreadPoolExecutoru
@@ -599,6 +615,7 @@ class VideoProcessor:
                     # Zápis pod zámkem – latest_frame čtou HTTP handlery z jiného vlákna.
                     with self._frame_lock:
                         self.latest_frame = jpeg_bytes
+                        self._latest_frame_seq += 1
                 encode_end_perf = time.perf_counter()
 
                 # ── Zápis na disk ──────────────────────────────────────────
