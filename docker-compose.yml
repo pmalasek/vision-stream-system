@@ -1,0 +1,117 @@
+version: "3.8"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Vision Stream System — docker-compose
+#
+#  Usage:
+#    1. Place your video file in ./videos/input.mp4
+#       (or override VIDEO_FILE env var)
+#    2. docker compose up --build
+#
+#  Ports exposed on the host:
+#    8554  — RTSP stream   (rtsp://localhost:8554/live)
+#    8000  — vprocessor    (http://localhost:8000)
+#    3000  — vdashboard    (http://localhost:3000)
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  vss-net:
+    driver: bridge
+
+volumes:
+  output-data:
+
+services:
+  # ── vstreamer ────────────────────────────────────────────────────────────────
+  vstreamer:
+    build:
+      context: ./vstreamer
+      dockerfile: Dockerfile
+    container_name: vstreamer
+    restart: unless-stopped
+    networks:
+      - vss-net
+    ports:
+      - "8554:8554"
+      - "8556:8556/udp" # UDP RTP
+      - "8557:8557/udp" # UDP RTCP
+    volumes:
+      # Mount local ./videos directory as read-only; put your video file here
+      - ./videos:/videos:ro
+    environment:
+      - VIDEO_FILE=${VIDEO_FILE:-/videos/input.mp4}
+    command:
+      - "./vstreamer"
+      - "--video"
+      - "${VIDEO_FILE:-/videos/input.mp4}"
+      - "--port"
+      - "8554"
+      - "--udp-rtp"
+      - "8556"
+      - "--udp-rtcp"
+      - "8557"
+      - "--path"
+      - "live"
+      - "--loop"
+      - "true"
+    healthcheck:
+      # nc checks that the RTSP TCP port is accepting connections
+      test: ["CMD-SHELL", "nc -z localhost 8554 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 8s
+
+  # ── vprocessor ───────────────────────────────────────────────────────────────
+  vprocessor:
+    build:
+      context: ./vprocessor
+      dockerfile: Dockerfile
+    container_name: vprocessor
+    restart: unless-stopped
+    networks:
+      - vss-net
+    ports:
+      - "8000:8000"
+    environment:
+      - RTSP_URL=rtsp://vstreamer:8554/live
+      - OUTPUT_DIR=/app/output
+      - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.5}
+      - PORT=8000
+      - HOST=0.0.0.0
+    volumes:
+      # Persisted recordings and metadata land here on the host
+      - output-data:/app/output
+      # Optionally bind-mount for direct host access:
+      # - ./output:/app/output
+    depends_on:
+      vstreamer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # YOLOv8 model download can take a while on first run
+
+  # ── vdashboard ───────────────────────────────────────────────────────────────
+  vdashboard:
+    build:
+      context: ./vdashboard
+      dockerfile: Dockerfile
+    container_name: vdashboard
+    restart: unless-stopped
+    networks:
+      - vss-net
+    ports:
+      - "3000:80"
+    depends_on:
+      vprocessor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:80 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

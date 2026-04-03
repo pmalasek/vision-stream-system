@@ -1,0 +1,35 @@
+# ── Compiled binary ───────────────────────────────────────────────
+vstreamer
+vstreamer.exe
+
+# ── Build output ──────────────────────────────────────────────────
+build/
+bin/
+
+# ── Vendor directory ──────────────────────────────────────────────
+vendor/
+
+# ── Test binaries and coverage ────────────────────────────────────
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# ── Go workspace ─────────────────────────────────────────────────
+go.work
+go.work.sum
+
+# ── Environment variables ─────────────────────────────────────────
+.env
+.env.local
+
+# ── OS ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE / editor ─────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

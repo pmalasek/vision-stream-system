@@ -182,9 +182,9 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#  and can be added to the global gitignore or merged into this file. However, if you prefer,
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
@@ -205,3 +205,46 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ── Node.js / npm / Vite (vdashboard) ────────────────────────────
+**/node_modules/
+vdashboard/dist/
+vdashboard/.env.local
+vdashboard/.env.*.local
+vdashboard/.vite/
+
+# ── Go build artefacts (vstreamer) ───────────────────────────────
+vstreamer/vstreamer
+vstreamer/vstreamer.exe
+vstreamer/vendor/
+
+# ── Video / media files ───────────────────────────────────────────
+video/
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+
+# ── Large installer / package binaries ───────────────────────────
+*.deb
+*.rpm
+*.AppImage
+*.dmg
+*.pkg
+
+# ── Docker ────────────────────────────────────────────────────────
+docker-compose.override.yml
+docker-compose.*.local.yml
+
+# ── IDE / editor ─────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
