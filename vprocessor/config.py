@@ -112,6 +112,10 @@ class Config:
     # Vyšší hodnota zmenšuje trhání při krátkodobém jitteru, ale zvyšuje latenci.
     RAW_FRAME_QUEUE_SIZE: int = int(os.getenv("RAW_FRAME_QUEUE_SIZE", "8"))
 
+    # Pokud je True, MJPEG /stream se generuje přímo z raw frame v grabber vlákně,
+    # takže není blokován detekcí / zápisem na disk v processing vlákně.
+    STREAM_FROM_RAW: bool = _env_bool("STREAM_FROM_RAW", True)
+
     # Povolit průběžné ukládání výstupů (MP4 + JSONL) na disk.
     # Pro čistý výkonový benchmark lze nastavit false.
     RECORD_OUTPUT: bool = _env_bool("RECORD_OUTPUT", True)

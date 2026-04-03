@@ -496,6 +496,17 @@ class VideoProcessor:
                 # vyzvednout – vždy chceme zpracovávat co nejčerstvější obraz.
                 with self._raw_frame_lock:
                     self._raw_frame_queue.append(frame)
+
+                if self.config.STREAM_FROM_RAW:
+                    ok, buffer = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+                    )
+                    if ok:
+                        jpeg_bytes = buffer.tobytes()
+                        with self._frame_lock:
+                            self.latest_frame = jpeg_bytes
+                            self._latest_frame_seq += 1
+
                 # Probuzení zpracovatelského vlákna, aby vědělo o novém snímku.
                 self._raw_frame_event.set()
 
@@ -550,6 +561,7 @@ class VideoProcessor:
         profile_interval: float = max(1.0, self.config.PROFILE_LOG_INTERVAL_SECONDS)
         detection_enabled: bool = self.config.ENABLE_DETECTION
         detect_every_n: int = max(1, self.config.DETECT_EVERY_N)
+        stream_from_raw: bool = self.config.STREAM_FROM_RAW
         profile_window_start: float = time.time()
         profile_frame_count: int = 0
         detect_sum_ms: float = 0.0
@@ -619,15 +631,16 @@ class VideoProcessor:
                 # ── Kódování do JPEG a uložení ─────────────────────────────
                 # Anotovaný snímek zakódujeme do JPEG s nastavenou kvalitou.
                 encode_start_perf = time.perf_counter()
-                ok, buffer = cv2.imencode(
-                    ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-                )
-                if ok:
-                    jpeg_bytes = buffer.tobytes()
-                    # Zápis pod zámkem – latest_frame čtou HTTP handlery z jiného vlákna.
-                    with self._frame_lock:
-                        self.latest_frame = jpeg_bytes
-                        self._latest_frame_seq += 1
+                if not stream_from_raw:
+                    ok, buffer = cv2.imencode(
+                        ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+                    )
+                    if ok:
+                        jpeg_bytes = buffer.tobytes()
+                        # Zápis pod zámkem – latest_frame čtou HTTP handlery z jiného vlákna.
+                        with self._frame_lock:
+                            self.latest_frame = jpeg_bytes
+                            self._latest_frame_seq += 1
                 encode_end_perf = time.perf_counter()
 
                 # ── Zápis na disk ──────────────────────────────────────────
