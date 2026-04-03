@@ -19,6 +19,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Vrátí bool hodnotu z proměnné prostředí.
+
+    True hodnoty: "1", "true", "yes", "on" (case-insensitive).
+    False hodnoty: "0", "false", "no", "off".
+    Při neznámé hodnotě vrací default.
+    """
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 class Config:
     """Třída sdružující veškerou konfiguraci aplikace.
 
@@ -68,6 +87,15 @@ class Config:
     # Starší segmenty jsou automaticky mazány, jakmile jejich počet překročí
     # tuto hodnotu.
     MAX_SEGMENTS: int = int(os.getenv("MAX_SEGMENTS", "3"))
+
+    # Zapnutí podrobného profilování pipeline po krocích (detect/encode/write/emit).
+    # Pokud je True, v logu se periodicky vypisují průměrné časy jednotlivých kroků.
+    PROFILE_PIPELINE: bool = _env_bool("PROFILE_PIPELINE", False)
+
+    # Interval (sekundy), po kterém se vypíše souhrn profilovacích metrik.
+    PROFILE_LOG_INTERVAL_SECONDS: float = float(
+        os.getenv("PROFILE_LOG_INTERVAL_SECONDS", "5")
+    )
 
 
 # Globální instance konfigurace určená k importu napříč celou aplikací.

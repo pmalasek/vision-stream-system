@@ -525,6 +525,23 @@ class VideoProcessor:
         # Čas posledního odeslání statistik přes Socket.IO.
         last_stats_time: float = time.time()
 
+        # ── Profilování pipeline (volitelné, řízené konfigurací) ─────────
+        profile_enabled: bool = self.config.PROFILE_PIPELINE
+        profile_interval: float = max(1.0, self.config.PROFILE_LOG_INTERVAL_SECONDS)
+        profile_window_start: float = time.time()
+        profile_frame_count: int = 0
+        detect_sum_ms: float = 0.0
+        encode_sum_ms: float = 0.0
+        write_sum_ms: float = 0.0
+        emit_sum_ms: float = 0.0
+        total_sum_ms: float = 0.0
+
+        if profile_enabled:
+            logger.info(
+                "Pipeline profiling ENABLED (interval=%.1f s)",
+                profile_interval,
+            )
+
         try:
             while self.running:
                 # ── Čekání na nový surový snímek ───────────────────────────
@@ -544,6 +561,8 @@ class VideoProcessor:
                 if frame is None or not self.running:
                     continue
 
+                frame_start_perf = time.perf_counter()
+
                 # Inkrementace globálního čítače zpracovaných snímků.
                 self.frame_count += 1
                 fps_frame_count += 1
@@ -552,7 +571,9 @@ class VideoProcessor:
                 # ── Detekce osob ───────────────────────────────────────────
                 # detector.detect() vrátí anotovaný snímek (s nakreslenými boxy)
                 # a seznam detekovaných objektů jako slovníky.
+                detect_start_perf = time.perf_counter()
                 annotated_frame, detections = self.detector.detect(frame)
+                detect_end_perf = time.perf_counter()
                 # Uložení detekcí pro HTTP endpoint /api/detections.
                 self.latest_detections = detections
                 # Průběžné sčítání celkového počtu detekcí od spuštění.
@@ -560,6 +581,7 @@ class VideoProcessor:
 
                 # ── Kódování do JPEG a uložení ─────────────────────────────
                 # Anotovaný snímek zakódujeme do JPEG s nastavenou kvalitou.
+                encode_start_perf = time.perf_counter()
                 ok, buffer = cv2.imencode(
                     ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
                 )
@@ -568,15 +590,18 @@ class VideoProcessor:
                     # Zápis pod zámkem – latest_frame čtou HTTP handlery z jiného vlákna.
                     with self._frame_lock:
                         self.latest_frame = jpeg_bytes
+                encode_end_perf = time.perf_counter()
 
                 # ── Zápis na disk ──────────────────────────────────────────
                 # Rekordér rozhodne, zda snímek zapsat (závisí na konfiguraci záznamu).
+                write_start_perf = time.perf_counter()
                 self.recorder.write_frame(
                     frame=annotated_frame,
                     frame_id=self.frame_count,
                     detections=detections,
                     timestamp=timestamp,
                 )
+                write_end_perf = time.perf_counter()
 
                 # ── Odeslání Socket.IO události "detection" ────────────────
                 # Payload obsahuje ID snímku, časové razítko, počet a seznam detekcí.
@@ -586,7 +611,17 @@ class VideoProcessor:
                     "person_count": len(detections),
                     "detections": detections,
                 }
+                emit_start_perf = time.perf_counter()
                 self._emit(self.sio.emit("detection", detection_payload))
+                emit_end_perf = time.perf_counter()
+
+                if profile_enabled:
+                    detect_sum_ms += (detect_end_perf - detect_start_perf) * 1000.0
+                    encode_sum_ms += (encode_end_perf - encode_start_perf) * 1000.0
+                    write_sum_ms += (write_end_perf - write_start_perf) * 1000.0
+                    emit_sum_ms += (emit_end_perf - emit_start_perf) * 1000.0
+                    total_sum_ms += (time.perf_counter() - frame_start_perf) * 1000.0
+                    profile_frame_count += 1
 
                 # ── Aktualizace FPS čítače ─────────────────────────────────
                 now = time.time()
@@ -602,6 +637,47 @@ class VideoProcessor:
                 if now - last_stats_time >= 1.0:
                     self._emit(self.sio.emit("stats", self._build_stats_payload()))
                     last_stats_time = now
+
+                if profile_enabled and (now - profile_window_start) >= profile_interval:
+                    if profile_frame_count > 0:
+                        avg_detect_ms = detect_sum_ms / profile_frame_count
+                        avg_encode_ms = encode_sum_ms / profile_frame_count
+                        avg_write_ms = write_sum_ms / profile_frame_count
+                        avg_emit_ms = emit_sum_ms / profile_frame_count
+                        avg_total_ms = total_sum_ms / profile_frame_count
+                        avg_other_ms = max(
+                            0.0,
+                            avg_total_ms
+                            - (
+                                avg_detect_ms
+                                + avg_encode_ms
+                                + avg_write_ms
+                                + avg_emit_ms
+                            ),
+                        )
+
+                        logger.info(
+                            "Pipeline profile (%d frames / %.1f s): "
+                            "avg_total=%.2f ms | detect=%.2f ms | encode=%.2f ms | "
+                            "write=%.2f ms | emit=%.3f ms | other=%.2f ms | fps=%.2f",
+                            profile_frame_count,
+                            now - profile_window_start,
+                            avg_total_ms,
+                            avg_detect_ms,
+                            avg_encode_ms,
+                            avg_write_ms,
+                            avg_emit_ms,
+                            avg_other_ms,
+                            self.fps,
+                        )
+
+                    profile_window_start = now
+                    profile_frame_count = 0
+                    detect_sum_ms = 0.0
+                    encode_sum_ms = 0.0
+                    write_sum_ms = 0.0
+                    emit_sum_ms = 0.0
+                    total_sum_ms = 0.0
 
         except Exception as exc:
             # Neočekávaná výjimka v inferenční smyčce – zalogujeme a přejdeme do stavu error.
