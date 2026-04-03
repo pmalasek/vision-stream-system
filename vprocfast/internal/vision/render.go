@@ -27,7 +27,11 @@ func AnnotateJPEG(
 	detections := detectFn(bounds.Dx(), bounds.Dy())
 
 	for _, d := range detections {
-		drawBox(rgba, d.X1, d.Y1, d.X2, d.Y2, color.RGBA{R: 80, G: 255, B: 120, A: 255})
+		var clr color.RGBA = color.RGBA{R: 80, G: 255, B: 120, A: 255}
+		if d.Confidence < 0.6 {
+			clr = color.RGBA{R: 255, G: 80, B: 80, A: 255}
+		}
+		drawBox(rgba, d.X1, d.Y1, d.X2, d.Y2, clr)
 	}
 
 	out := bytes.NewBuffer(nil)
