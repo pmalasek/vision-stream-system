@@ -73,7 +73,7 @@ Rozdělil jsem si zadání do tří modulů :
 |-----------|-------------|------|-------|
 | **vstreamer** | Go + gortsplib + ffmpeg | `8554` (RTSP) | Načte video soubor a streamuje ho jako RTSP stream — chová se jako IP kamera |
 | **vprocessor** | Python + FastAPI + YOLOv8 | `8000` (HTTP) | Zachytává RTSP stream, detekuje osoby, streamuje výsledky přes MJPEG + Socket.IO |
-| **vprocfast** | Go (MVP, synthetic pipeline) | `8001` (HTTP) | Alternativní Go-only procesor s kompatibilním API (`/stream`, `/api/stats`, `/api/detections`, `/socket.io`) |
+| **vprocfast** | Go (MVP, synthetic pipeline) | `8001` (HTTP) | Alternativní Go-only procesor s kompatibilním API  (`/stream`, `/api/stats`, `/api/detections`, `/socket.io`) a zpracováním obrazu v Python podmodulu |
 | **vdashboard** | React + TypeScript + Tailwind | `3000` (HTTP) | Webový dashboard zobrazující živý stream a real-time metadata detekcí |
 
 `vProcFast` vznikl jako **testovací prostředí pro spolupráci Go a Pythonu**: cílem je mít rychlý, jednoduše laditelný Go backend se stejným API kontraktem jako `vprocessor`, na kterém lze bezpečně ověřovat změny v pipeline, streamingu a dashboardu bez nutnosti hned zasahovat do produkčnější Python/YOLO části.
