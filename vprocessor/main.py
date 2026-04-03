@@ -17,16 +17,24 @@ Tento modul zajišťuje:
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
+from fractions import Fraction
 
+import av
+import cv2
+import numpy as np
 import socketio
+from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from config import config
 from detector import PersonDetector
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from processor import VideoProcessor
 from recorder import VideoRecorder
 
@@ -81,6 +89,9 @@ _start_time: float = 0.0
 # Inkrementován při připojení, dekrementován při odpojení.
 _connected_clients: int = 0
 
+# Aktivní WebRTC peer spojení (pc_id -> session).
+_webrtc_sessions: dict[str, dict] = {}
+
 # Reference na běžící instanci uvicorn.Server.
 # Nastavuje ji __main__ entry point PŘED voláním server.run(), takže
 # generátor MJPEG streamu může číst atribut server.should_exit a sám
@@ -89,6 +100,114 @@ _connected_clients: int = 0
 # zůstane None a generátor se spolehne na běžnou nekonečnou smyčku
 # (stále přerušitelnou zrušením asyncio tasku při force-exit).
 _uvicorn_server = None  # uvicorn.Server | None
+
+
+class WebRTCOffer(BaseModel):
+    """SDP offer payload přijatý z browseru."""
+
+    sdp: str
+    type: str
+
+
+class ProcessorVideoTrack(VideoStreamTrack):
+    """WebRTC video track napojený na zpracované snímky z VideoProcessoru."""
+
+    kind = "video"
+
+    def __init__(self, video_processor: VideoProcessor):
+        super().__init__()
+        self._processor = video_processor
+        self._last_seq = -1
+        self._last_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        self._last_frame_id = 0
+        self._last_timestamp = 0.0
+        self._pts = 0
+        self._time_base = Fraction(1, 90_000)
+
+    @property
+    def current_meta(self) -> dict:
+        return {
+            "frame_id": self._last_frame_id,
+            "timestamp": self._last_timestamp,
+        }
+
+    async def recv(self):
+        # Jemné pacing omezuje CPU spin a drží stabilní video výstup.
+        await asyncio.sleep(1 / 30)
+
+        jpeg_bytes, seq, frame_id, timestamp = (
+            self._processor.get_latest_webrtc_frame_with_meta()
+        )
+
+        if jpeg_bytes and seq != self._last_seq:
+            decoded = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if decoded is not None:
+                self._last_frame = decoded
+                self._last_seq = seq
+                self._last_frame_id = frame_id
+                self._last_timestamp = timestamp
+
+        frame = av.VideoFrame.from_ndarray(self._last_frame, format="bgr24")
+        self._pts += 3000  # 90_000 / 30 FPS
+        frame.pts = self._pts
+        frame.time_base = self._time_base
+        return frame
+
+
+async def _wait_for_ice_gathering(pc: RTCPeerConnection):
+    """Počká na dokončení ICE gathering, aby odpověď obsahovala kandidáty."""
+    if pc.iceGatheringState == "complete":
+        return
+
+    done = asyncio.Event()
+
+    @pc.on("icegatheringstatechange")
+    async def _on_ice_state_change():
+        if pc.iceGatheringState == "complete":
+            done.set()
+
+    try:
+        await asyncio.wait_for(done.wait(), timeout=3.0)
+    except TimeoutError:
+        logger.warning("ICE gathering timeout, vracím partial SDP answer.")
+
+
+async def _frame_meta_pump(
+    pc: RTCPeerConnection, channel, track: ProcessorVideoTrack
+) -> None:
+    """Průběžně posílá frame_id/timestamp metadata přes WebRTC data channel."""
+    last_frame_id = -1
+
+    while True:
+        if pc.connectionState in {"failed", "closed"}:
+            return
+
+        if channel.readyState == "open":
+            meta = track.current_meta
+            frame_id = int(meta.get("frame_id") or 0)
+            if frame_id > 0 and frame_id != last_frame_id:
+                channel.send(json.dumps(meta))
+                last_frame_id = frame_id
+
+        await asyncio.sleep(0.01)
+
+
+async def _cleanup_webrtc_session(pc_id: str) -> None:
+    """Uzavře WebRTC session a odstraní ji z registru."""
+    session = _webrtc_sessions.pop(pc_id, None)
+    if not session:
+        return
+
+    task = session.get("meta_task")
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    pc = session.get("pc")
+    if pc is not None:
+        with contextlib.suppress(Exception):
+            await pc.close()
 
 # ---------------------------------------------------------------------------
 # Lifespan kontextový manažer
@@ -191,6 +310,10 @@ async def lifespan(app: FastAPI):
         # "Task exception was never retrieved".
         with contextlib.suppress(Exception):
             await _processor_task
+
+    # Uzavření všech aktivních WebRTC peer session při shutdownu.
+    for pc_id in list(_webrtc_sessions.keys()):
+        await _cleanup_webrtc_session(pc_id)
 
     logger.info("=== vprocessor shutdown complete ===")
 
@@ -365,6 +488,54 @@ async def mjpeg_stream():
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+@app.post("/webrtc/offer", tags=["video"])
+async def webrtc_offer(offer: WebRTCOffer):
+    """Vytvoří WebRTC peer connection a vrátí SDP answer pro browser klienta."""
+    if not config.ENABLE_WEBRTC:
+        raise HTTPException(status_code=503, detail="WebRTC is disabled by config")
+
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Processor not ready")
+
+    pc = RTCPeerConnection()
+    pc_id = str(uuid.uuid4())
+    logger.info("WebRTC peer created: %s", pc_id)
+
+    track = ProcessorVideoTrack(processor)
+    pc.addTrack(track)
+    meta_channel = pc.createDataChannel("frame-meta")
+    meta_task = asyncio.create_task(_frame_meta_pump(pc, meta_channel, track))
+
+    _webrtc_sessions[pc_id] = {
+        "pc": pc,
+        "meta_task": meta_task,
+    }
+
+    @pc.on("connectionstatechange")
+    async def _on_connectionstatechange():
+        logger.info("WebRTC peer %s state: %s", pc_id, pc.connectionState)
+        if pc.connectionState in {"failed", "closed"}:
+            await _cleanup_webrtc_session(pc_id)
+
+    try:
+        await pc.setRemoteDescription(
+            RTCSessionDescription(sdp=offer.sdp, type=offer.type)
+        )
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await _wait_for_ice_gathering(pc)
+
+        return {
+            "sdp": pc.localDescription.sdp,
+            "type": pc.localDescription.type,
+            "peer_id": pc_id,
+        }
+    except Exception as exc:
+        logger.exception("WebRTC handshake failed for peer %s: %s", pc_id, exc)
+        await _cleanup_webrtc_session(pc_id)
+        raise HTTPException(status_code=500, detail="WebRTC handshake failed")
 
 
 @app.get("/health", tags=["monitoring"])

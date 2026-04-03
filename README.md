@@ -187,6 +187,7 @@ Dostupné API endpointy:
 | Metoda | Cesta | Popis |
 |--------|-------|-------|
 | `GET` | `/stream` | MJPEG video stream |
+| `POST` | `/webrtc/offer` | WebRTC signaling endpoint (SDP offer/answer) |
 | `GET` | `/health` | Zdravotní stav služby + statistiky |
 | `GET` | `/api/stats` | Aktuální statistiky zpracování |
 | `GET` | `/api/detections?limit=100&offset=0` | Historie detekcí ze souboru JSONL |

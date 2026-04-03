@@ -11,8 +11,8 @@
  *  3. Živý stream           – MJPEG pipe aktivně dodává snímky, zobrazí se LIVE badge
  */
 
-import React, { useState } from "react";
-import type { StatsEvent } from "../types";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import type { FrameMetaEvent, StatsEvent } from "../types";
 
 /**
  * Props komponenty VideoStream.
@@ -25,8 +25,30 @@ import type { StatsEvent } from "../types";
  */
 interface VideoStreamProps {
   streamUrl: string;
+  webrtcUrl?: string;
+  useWebRTC?: boolean;
+  onFrameMeta?: (meta: FrameMetaEvent) => void;
   isConnected: boolean;
   stats: StatsEvent | null;
+}
+
+async function waitForIceGatheringComplete(pc: RTCPeerConnection): Promise<void> {
+  if (pc.iceGatheringState === "complete") return;
+
+  await new Promise<void>((resolve) => {
+    const onStateChange = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", onStateChange);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", onStateChange);
+
+    setTimeout(() => {
+      pc.removeEventListener("icegatheringstatechange", onStateChange);
+      resolve();
+    }, 3000);
+  });
 }
 
 /**
@@ -110,6 +132,9 @@ const STATUS_OVERLAY: Record<
  */
 const VideoStream: React.FC<VideoStreamProps> = ({
   streamUrl,
+  webrtcUrl,
+  useWebRTC = true,
+  onFrameMeta,
   isConnected,
   stats,
 }) => {
@@ -127,6 +152,10 @@ const VideoStream: React.FC<VideoStreamProps> = ({
    * Resetuje se při chybě, aby se znovu ukázal loading spinner po reconnectu.
    */
   const [imgLoaded, setImgLoaded] = useState(false);
+  const [webrtcState, setWebrtcState] = useState<
+    "idle" | "connecting" | "live" | "error"
+  >("idle");
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   /**
    * handleError – voláno browserem při chybě načítání `<img>`.
@@ -148,6 +177,125 @@ const VideoStream: React.FC<VideoStreamProps> = ({
     setImgLoaded(true);
   };
 
+  const handleFrameMetaMessage = useCallback(
+    (rawData: unknown) => {
+      if (!onFrameMeta) return;
+
+      try {
+        const text =
+          typeof rawData === "string"
+            ? rawData
+            : rawData instanceof ArrayBuffer
+              ? new TextDecoder().decode(rawData)
+              : "";
+        if (!text) return;
+
+        const parsed = JSON.parse(text) as Partial<FrameMetaEvent>;
+        if (
+          typeof parsed.frame_id === "number" &&
+          Number.isFinite(parsed.frame_id) &&
+          typeof parsed.timestamp === "number" &&
+          Number.isFinite(parsed.timestamp)
+        ) {
+          onFrameMeta({ frame_id: parsed.frame_id, timestamp: parsed.timestamp });
+        }
+      } catch {
+        // ignorujeme nevalidní payload
+      }
+    },
+    [onFrameMeta],
+  );
+
+  useEffect(() => {
+    if (!useWebRTC) return;
+
+    const signalingBase = (webrtcUrl ?? window.location.origin).replace(/\/$/, "");
+    let closed = false;
+    let pc: RTCPeerConnection | null = null;
+
+    const start = async () => {
+      setWebrtcState("connecting");
+
+      try {
+        pc = new RTCPeerConnection();
+
+        pc.ontrack = (event) => {
+          const [stream] = event.streams;
+          if (!stream || !videoRef.current) return;
+          videoRef.current.srcObject = stream;
+          void videoRef.current.play().catch(() => {
+            // autoPlay může být blokováno browser politikou; stream zůstává navázaný
+          });
+        };
+
+        pc.ondatachannel = (event) => {
+          if (event.channel.label !== "frame-meta") return;
+          event.channel.onmessage = (msgEvent) => {
+            handleFrameMetaMessage(msgEvent.data);
+          };
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (!pc || closed) return;
+          if (pc.connectionState === "connected") setWebrtcState("live");
+          if (
+            pc.connectionState === "failed" ||
+            pc.connectionState === "disconnected" ||
+            pc.connectionState === "closed"
+          ) {
+            setWebrtcState("error");
+          }
+        };
+
+        pc.addTransceiver("video", { direction: "recvonly" });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGatheringComplete(pc);
+
+        const localDesc = pc.localDescription;
+        if (!localDesc) throw new Error("Missing localDescription");
+
+        const response = await fetch(`${signalingBase}/webrtc/offer`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sdp: localDesc.sdp, type: localDesc.type }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`WebRTC signaling failed (${response.status})`);
+        }
+
+        const answer = (await response.json()) as {
+          sdp: string;
+          type: RTCSdpType;
+        };
+
+        await pc.setRemoteDescription(answer);
+      } catch {
+        if (!closed) {
+          setWebrtcState("error");
+        }
+      }
+    };
+
+    void start();
+
+    return () => {
+      closed = true;
+      if (pc) {
+        pc.ontrack = null;
+        pc.onconnectionstatechange = null;
+        pc.ondatachannel = null;
+        pc.close();
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      setWebrtcState("idle");
+    };
+  }, [handleFrameMetaMessage, useWebRTC, webrtcUrl]);
+
   /**
    * isLive – true pouze tehdy, když MJPEG pipe aktivně dodává živé snímky.
    *
@@ -160,8 +308,8 @@ const VideoStream: React.FC<VideoStreamProps> = ({
    * Pokud libovolná podmínka selže, stream není považován za živý a zobrazí
    * se buď no-signal nebo frozen-frame overlay.
    */
-  const isLive =
-    isConnected && !imgError && imgLoaded && stats?.status === "streaming";
+  const videoReady = useWebRTC ? webrtcState === "live" : !imgError && imgLoaded;
+  const isLive = isConnected && videoReady && stats?.status === "streaming";
 
   /**
    * showNoSignal – true když nemáme žádný použitelný snímek k zobrazení.
@@ -175,7 +323,9 @@ const VideoStream: React.FC<VideoStreamProps> = ({
    * V tomto stavu je `<img>` element neviditelný (opacity-0), aby nezabíral
    * vizuální prostor, a celou plochu pokryje tmavý overlay.
    */
-  const showNoSignal = !isConnected || imgError || !imgLoaded;
+  const showNoSignal = useWebRTC
+    ? !isConnected || webrtcState === "connecting" || webrtcState === "error"
+    : !isConnected || imgError || !imgLoaded;
 
   /**
    * showFrozenOverlay – true když máme snímek, ale stream není živý.
@@ -251,19 +401,35 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                                    zešednutý a poloprůhledný jako „ghosting"
             opacity-100          → isLive: plně viditelný živý obraz
         */}
-        <img
-          src={streamUrl}
-          alt="Live MJPEG stream"
-          className={`w-full h-full object-contain transition-opacity duration-300 ${
-            showNoSignal
-              ? "opacity-0"
-              : showFrozenOverlay
-                ? "opacity-40 grayscale"
-                : "opacity-100"
-          }`}
-          onLoad={handleLoad}
-          onError={handleError}
-        />
+        {useWebRTC ? (
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            className={`w-full h-full object-contain transition-opacity duration-300 ${
+              showNoSignal
+                ? "opacity-0"
+                : showFrozenOverlay
+                  ? "opacity-40 grayscale"
+                  : "opacity-100"
+            }`}
+          />
+        ) : (
+          <img
+            src={streamUrl}
+            alt="Live MJPEG stream"
+            className={`w-full h-full object-contain transition-opacity duration-300 ${
+              showNoSignal
+                ? "opacity-0"
+                : showFrozenOverlay
+                  ? "opacity-40 grayscale"
+                  : "opacity-100"
+            }`}
+            onLoad={handleLoad}
+            onError={handleError}
+          />
+        )}
 
         {/* ── No-signal overlay (žádný použitelný snímek) ────────────────── */}
         {/*
@@ -287,7 +453,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({
         */}
         {showNoSignal && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-gray-950">
-            {isConnected && !imgError ? (
+            {(useWebRTC ? webrtcState === "connecting" : isConnected && !imgError) ? (
               /* Větev „loading": jsme připojeni, čekáme na první snímek */
               <>
                 <svg
@@ -311,7 +477,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                   />
                 </svg>
                 <p className="text-gray-400 text-sm font-medium animate-pulse">
-                  Loading stream…
+                  {useWebRTC ? "Establishing WebRTC…" : "Loading stream…"}
                 </p>
               </>
             ) : (

@@ -25,6 +25,8 @@ import VideoStream from "./components/VideoStream";
 import StatsPanel from "./components/StatsPanel";
 import DetectionPanel from "./components/DetectionPanel";
 import { useSocket } from "./hooks/useSocket";
+import { useEffect, useRef, useState } from "react";
+import type { DetectionEvent, FrameMetaEvent } from "./types";
 
 /**
  * Základní URL adresa backendu (processor služby).
@@ -53,6 +55,15 @@ const PROCESSOR_BASE =
  */
 const DIRECT_STREAM_URL = import.meta.env.VITE_STREAM_URL as string | undefined;
 
+/** Volitelná přímá URL pro WebRTC signaling endpoint backendu. */
+const WEBRTC_BASE_URL =
+  (import.meta.env.VITE_WEBRTC_URL as string | undefined) ?? PROCESSOR_BASE;
+
+/** Zapíná WebRTC přehrávání videa (výchozí true). */
+const USE_WEBRTC =
+  (import.meta.env.VITE_USE_WEBRTC as string | undefined)?.toLowerCase() !==
+  "false";
+
 /**
  * Plná URL adresa MJPEG video streamu.
  *
@@ -75,6 +86,58 @@ export default function App() {
   // Připojení k Socket.IO serveru; hook udržuje stav spojení a
   // reaktivně aktualizuje `latestDetection` a `stats` při každé události.
   const { latestDetection, stats, isConnected } = useSocket();
+
+  // Poslední frame_id potvrzený WebRTC data channel (reálně přehraný obraz).
+  const [videoFrameMeta, setVideoFrameMeta] = useState<FrameMetaEvent | null>(
+    null,
+  );
+
+  // Detekce doručené dříve přes Socket.IO než dojde odpovídající video frame.
+  const pendingDetectionsRef = useRef<DetectionEvent[]>([]);
+
+  // Detekce, kterou skutečně zobrazíme v UI (po synchronizaci na frame_id videa).
+  const [syncedDetection, setSyncedDetection] = useState<DetectionEvent | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!latestDetection) return;
+
+    if (!USE_WEBRTC) {
+      setSyncedDetection(latestDetection);
+      return;
+    }
+
+    pendingDetectionsRef.current.push(latestDetection);
+    if (pendingDetectionsRef.current.length > 500) {
+      pendingDetectionsRef.current = pendingDetectionsRef.current.slice(-500);
+    }
+  }, [latestDetection]);
+
+  useEffect(() => {
+    if (!USE_WEBRTC) return;
+    if (!videoFrameMeta) return;
+
+    const currentFrameId = videoFrameMeta.frame_id;
+    if (!Number.isFinite(currentFrameId) || currentFrameId <= 0) return;
+
+    const queue = pendingDetectionsRef.current;
+    let newestReady: DetectionEvent | null = null;
+    const remaining: DetectionEvent[] = [];
+
+    for (const evt of queue) {
+      if (evt.frame_id <= currentFrameId) {
+        newestReady = evt;
+      } else {
+        remaining.push(evt);
+      }
+    }
+
+    pendingDetectionsRef.current = remaining;
+    if (newestReady) {
+      setSyncedDetection(newestReady);
+    }
+  }, [videoFrameMeta]);
 
   return (
     /*
@@ -120,6 +183,9 @@ export default function App() {
           <div className="lg:col-span-2 flex flex-col lg:min-h-0">
             <VideoStream
               streamUrl={STREAM_URL}
+              webrtcUrl={WEBRTC_BASE_URL}
+              useWebRTC={USE_WEBRTC}
+              onFrameMeta={setVideoFrameMeta}
               isConnected={isConnected}
               stats={stats}
             />
@@ -139,7 +205,9 @@ export default function App() {
             {/* Panel se statistikami (FPS, počet snímků, uptime, stav) */}
             <StatsPanel stats={stats} isConnected={isConnected} />
             {/* Panel s posledním detekčním eventem (bounding boxy, počet osob) */}
-            <DetectionPanel detection={latestDetection} />
+            <DetectionPanel
+              detection={USE_WEBRTC ? syncedDetection : latestDetection}
+            />
           </div>
         </div>
       </main>

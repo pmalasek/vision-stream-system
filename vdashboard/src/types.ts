@@ -43,7 +43,7 @@ export interface DetectionEvent {
    * Časové razítko zpracování snímku ve formátu ISO 8601
    * (např. `"2024-06-01T12:00:00.000Z"`).
    */
-  timestamp: string;
+  timestamp: string | number;
 
   /** Celkový počet osob detekovaných v tomto snímku. */
   person_count: number;
@@ -54,6 +54,14 @@ export interface DetectionEvent {
    * Pole je prázdné, pokud nebyla v snímku detekována žádná osoba.
    */
   detections: Detection[];
+}
+
+/**
+ * Metadata o právě přehrávaném video snímku doručovaná přes WebRTC data channel.
+ */
+export interface FrameMetaEvent {
+  frame_id: number;
+  timestamp: number;
 }
 
 /**

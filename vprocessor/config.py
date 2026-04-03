@@ -123,6 +123,9 @@ class Config:
     # Kvalita JPEG pro /stream (0–100). Nižší hodnota = menší CPU + síťový tok.
     STREAM_JPEG_QUALITY: int = int(os.getenv("STREAM_JPEG_QUALITY", "80"))
 
+    # Povolit WebRTC video endpoint (/webrtc/offer).
+    ENABLE_WEBRTC: bool = _env_bool("ENABLE_WEBRTC", True)
+
     # Povolit průběžné ukládání výstupů (MP4 + JSONL) na disk.
     # Pro čistý výkonový benchmark lze nastavit false.
     RECORD_OUTPUT: bool = _env_bool("RECORD_OUTPUT", True)

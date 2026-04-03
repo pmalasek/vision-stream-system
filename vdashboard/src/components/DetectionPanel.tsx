@@ -48,17 +48,30 @@ const MAX_HISTORY = 10;
  *             (neplatný vstup), vrátí se původní `iso` string jako fallback,
  *             aby UI nezobrazilo prázdný nebo chybový řetězec.
  */
-function formatTimestamp(iso: string): string {
+function formatTimestamp(ts: string | number): string {
   try {
-    // Vytvoříme Date objekt z ISO stringu; hodí výjimku při zcela neplatném vstupu.
-    return new Date(iso).toLocaleTimeString([], {
+    const raw = typeof ts === "string" ? ts.trim() : ts;
+    const numeric =
+      typeof raw === "number"
+        ? raw
+        : raw !== "" && Number.isFinite(Number(raw))
+          ? Number(raw)
+          : null;
+
+    const date =
+      numeric !== null
+        ? // Heuristika: hodnoty < 1e12 bereme jako sekundy, jinak ms.
+          new Date(numeric < 1_000_000_000_000 ? numeric * 1000 : numeric)
+        : new Date(ts);
+
+    return date.toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
     });
   } catch {
     // Fallback: vrátíme surový string, aby komponenta nespadla a něco zobrazila.
-    return iso;
+    return String(ts);
   }
 }
 

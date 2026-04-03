@@ -186,6 +186,16 @@ class VideoProcessor:
         # úspěšném zápisu nového JPEG snímku.
         self._latest_frame_seq: int = 0
 
+        # ── Sdílený JPEG výstup pro WebRTC (synchronizovaný na processing loop)
+        # Tento buffer je vždy aktualizován z processing vlákna pro každý
+        # zpracovaný snímek, takže metadata frame_id/timestamp přesně odpovídají
+        # odesílanému video snímku.
+        self._webrtc_frame_lock = threading.Lock()
+        self.latest_webrtc_frame: bytes | None = None
+        self._latest_webrtc_seq: int = 0
+        self._latest_webrtc_frame_id: int = 0
+        self._latest_webrtc_timestamp: float = 0.0
+
         # ── Pomocné stavové proměnné ───────────────────────────────────────
         # Poslední seznam detekcí (sdíleno s HTTP endpointy).
         self.latest_detections: list[dict] = []
@@ -388,6 +398,26 @@ class VideoProcessor:
         """
         with self._frame_lock:
             return self.latest_frame, self._latest_frame_seq
+
+    def get_latest_webrtc_frame_with_meta(self) -> tuple[bytes | None, int, int, float]:
+        """Vrátí nejnovější WebRTC JPEG snímek, seq a synchronizační metadata.
+
+        Returns
+        -------
+        tuple[bytes | None, int, int, float]
+            Dvojice ``(frame_bytes, seq, frame_id, timestamp)``.
+            - ``frame_bytes`` je JPEG obsah nebo ``None``.
+            - ``seq`` je monotonně rostoucí čítač změn snímku.
+            - ``frame_id`` je pořadové číslo zpracovaného snímku.
+            - ``timestamp`` je Unix timestamp (sekundy) při zpracování snímku.
+        """
+        with self._webrtc_frame_lock:
+            return (
+                self.latest_webrtc_frame,
+                self._latest_webrtc_seq,
+                self._latest_webrtc_frame_id,
+                self._latest_webrtc_timestamp,
+            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Interní metody – spouštěné v pracovních vláknech ThreadPoolExecutoru
@@ -656,13 +686,21 @@ class VideoProcessor:
                 # ── Kódování do JPEG a uložení ─────────────────────────────
                 # Anotovaný snímek zakódujeme do JPEG s nastavenou kvalitou.
                 encode_start_perf = time.perf_counter()
-                if not stream_from_raw:
-                    ok, buffer = cv2.imencode(
-                        ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-                    )
-                    if ok:
-                        jpeg_bytes = buffer.tobytes()
-                        # Zápis pod zámkem – latest_frame čtou HTTP handlery z jiného vlákna.
+                ok, buffer = cv2.imencode(
+                    ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+                )
+                if ok:
+                    jpeg_bytes = buffer.tobytes()
+
+                    # Snímek pro WebRTC + metadata přes data channel.
+                    with self._webrtc_frame_lock:
+                        self.latest_webrtc_frame = jpeg_bytes
+                        self._latest_webrtc_seq += 1
+                        self._latest_webrtc_frame_id = self.frame_count
+                        self._latest_webrtc_timestamp = timestamp
+
+                    # MJPEG /stream z processing loop pouze pokud není zapnutý raw path.
+                    if not stream_from_raw:
                         with self._frame_lock:
                             self.latest_frame = jpeg_bytes
                             self._latest_frame_seq += 1

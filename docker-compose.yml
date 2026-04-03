@@ -82,6 +82,7 @@ services:
       - STREAM_FROM_RAW=${STREAM_FROM_RAW:-true}
       - STREAM_SCALE=${STREAM_SCALE:-1.0}
       - STREAM_JPEG_QUALITY=${STREAM_JPEG_QUALITY:-80}
+      - ENABLE_WEBRTC=${ENABLE_WEBRTC:-true}
       - RECORD_OUTPUT=${RECORD_OUTPUT:-true}
       - PROFILE_PIPELINE=${PROFILE_PIPELINE:-false}
       - PROFILE_LOG_INTERVAL_SECONDS=${PROFILE_LOG_INTERVAL_SECONDS:-5}
@@ -110,6 +111,8 @@ services:
       args:
         VITE_PROCESSOR_URL: ${VITE_PROCESSOR_URL:-}
         VITE_STREAM_URL: ${VITE_STREAM_URL:-http://172.24.0.40:8000/stream}
+        VITE_WEBRTC_URL: ${VITE_WEBRTC_URL:-}
+        VITE_USE_WEBRTC: ${VITE_USE_WEBRTC:-true}
     container_name: vdashboard
     restart: unless-stopped
     networks:

@@ -96,6 +96,12 @@ export default defineConfig({
         target: "http://localhost:8000",
         changeOrigin: true, // přepíše hlavičku Host na cílový server
       },
+
+      // WebRTC signaling (SDP offer/answer)
+      "/webrtc": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
     },
   },
 });
