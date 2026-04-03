@@ -48,6 +48,8 @@ services:
       - "live"
       - "--loop"
       - "true"
+      - "--copy-video"
+      - "${STREAMER_COPY_VIDEO:-true}"
     healthcheck:
       # nc checks that the RTSP TCP port is accepting connections
       test: ["CMD-SHELL", "nc -z localhost 8554 || exit 1"]

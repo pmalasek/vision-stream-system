@@ -63,6 +63,11 @@ type appConfig struct {
 	// loop určuje, zda má ffmpeg přehrávat soubor ve smyčce donekonečna.
 	// Při hodnotě false stream skončí po přehrání souboru (jednorázové přehrání).
 	loop bool
+
+	// copyVideo určuje, zda se má video stopa pouze kopírovat (bez re-enkódování).
+	// true výrazně snižuje CPU zátěž a typicky zlepšuje plynulost, pokud je vstupní
+	// kodek kompatibilní s RTSP konzumentem (typicky H.264).
+	copyVideo bool
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +355,7 @@ func (sh *serverHandler) OnStreamWriteError(ctx *gortsplib.ServerHandlerOnStream
 // zadaný videosoubor a publikoval ho jako RTSP stream na lokální server.
 // Argumenty jsou navrženy pro minimální latenci a maximální kompatibilitu
 // s konzumenty jako OpenCV nebo VLC.
-func buildFFmpegArgs(videoFile string, port int, streamPath string, loop bool) []string {
+func buildFFmpegArgs(videoFile string, port int, streamPath string, loop bool, copyVideo bool) []string {
 	args := []string{
 		// -re: čti vstup v reálném čase (native frame rate).
 		// Bez tohoto přepínače by ffmpeg poslal celý soubor co nejrychleji
@@ -369,29 +374,27 @@ func buildFFmpegArgs(videoFile string, port int, streamPath string, loop bool) [
 	args = append(args,
 		// -i <soubor>: cesta ke vstupnímu videosouboru (zdroj snímků).
 		"-i", videoFile,
+	)
 
+	if copyVideo {
+		// -c:v copy: bez re-enkódování, nejnižší CPU zátěž a minimální latency.
+		args = append(args, "-c:v", "copy")
+	} else {
 		// -c:v libx264: překóduj video stopu kodekem H.264 (libx264).
 		// H.264 je nejlépe podporovaný videoformát v RTSP/RTP ekosystému;
 		// OpenCV, VLC i gortsplib ho zpracují nativně bez dalších závislostí.
-		"-c:v", "libx264",
+		args = append(args,
+			"-c:v", "libx264",
+			// -preset ultrafast: nejrychlejší enkódovací preset libx264.
+			"-preset", "ultrafast",
+			// -tune zerolatency: režim minimální latence.
+			"-tune", "zerolatency",
+			// -pix_fmt yuv420p: nejkompatibilnější pixel formát.
+			"-pix_fmt", "yuv420p",
+		)
+	}
 
-		// -preset ultrafast: nejrychlejší enkódovací preset libx264.
-		// Snižuje výpočetní náročnost enkódování na minimum na úkor kompresního
-		// poměru – pro relay z lokálního souboru je to ideální kompromis,
-		// protože nám jde o nízkou latenci, ne o velikost streamu.
-		"-preset", "ultrafast",
-
-		// -tune zerolatency: nastaví libx264 do režimu nulové latence.
-		// Zakáže B-snímky a vyrovnávací buffery, které by jinak zvyšovaly
-		// latenci o desítky až stovky milisekund. Klíčové pro použití s živým
-		// zpracováním (inference v reálném čase).
-		"-tune", "zerolatency",
-
-		// -pix_fmt yuv420p: výstupní pixel formát YUV 4:2:0.
-		// Jde o nejkompatibilnější formát pro H.264 – vyžaduje ho například
-		// OpenCV při dekódování. Bez tohoto přepínače by libx264 mohl zvolit
-		// jiný formát (např. yuv444p), který řada dekoderů nepodporuje.
-		"-pix_fmt", "yuv420p",
+	args = append(args,
 
 		// -an: bez zvuku (audio not included).
 		// Odstraní veškeré audio stopy ze výstupu. Vprocessor zvuk nepotřebuje
@@ -429,7 +432,7 @@ func buildFFmpegArgs(videoFile string, port int, streamPath string, loop bool) [
 //   - port: port RTSP serveru, na který bude ffmpeg publikovat
 //   - streamPath: cesta streamu (např. "live")
 //   - loop: pokud true, ffmpeg se po skončení restartuje
-func runFFmpegLoop(ctx context.Context, videoFile string, port int, streamPath string, loop bool) {
+func runFFmpegLoop(ctx context.Context, videoFile string, port int, streamPath string, loop bool, copyVideo bool) {
 	for {
 		// Před každým pokusem o spuštění zkontrolujeme, zda nebyl kontext zrušen.
 		// Tím zabráníme zbytečnému spouštění ffmpeg po obdržení signálu ukončení.
@@ -442,7 +445,7 @@ func runFFmpegLoop(ctx context.Context, videoFile string, port int, streamPath s
 		}
 
 		// Sestavíme argumenty příkazu ffmpeg pro aktuální konfiguraci.
-		args := buildFFmpegArgs(videoFile, port, streamPath, loop)
+		args := buildFFmpegArgs(videoFile, port, streamPath, loop, copyVideo)
 		log.Printf("[INFO] spawning ffmpeg with args: %v", args)
 
 		// Vytvoříme příkaz svázaný s kontextem: jakmile bude ctx zrušen,
@@ -516,6 +519,8 @@ func parseFlags() *appConfig {
 		"cesta streamu v URL, např. 'live' → rtsp://host:port/live")
 	flag.BoolVar(&cfg.loop, "loop", true,
 		"opakovat video ve smyčce po jeho skončení")
+	flag.BoolVar(&cfg.copyVideo, "copy-video", false,
+		"kopírovat video bez re-enkódování (nižší CPU, vhodné pro H.264 vstupy)")
 
 	// Vlastní nápověda: přidáme stručný popis použití před výpis přepínačů.
 	flag.Usage = func() {
@@ -556,6 +561,7 @@ func logStartup(cfg *appConfig) {
 	log.Printf("[INFO]   UDP RTCP port : %d", cfg.udpRTCPPort)
 	log.Printf("[INFO]   stream path   : %s", cfg.streamPath)
 	log.Printf("[INFO]   loop          : %v", cfg.loop)
+	log.Printf("[INFO]   copy video    : %v", cfg.copyVideo)
 	// Pomocný tip pro ruční ověření streamu přehrávačem VLC.
 	// Přepínač --no-satip-enable zabraňuje VLC v pokusu o SAT>IP protokol,
 	// který by mohl interferovat s běžným RTSP připojením.
@@ -648,7 +654,7 @@ func waitAndStartFFmpeg(ctx context.Context, cfg *appConfig) error {
 
 	// Spustíme smyčku ffmpeg v samostatné goroutině, aby neblokovala hlavní vlákno.
 	// Goroutina poběží až do zrušení kontextu (signál ukončení).
-	go runFFmpegLoop(ctx, cfg.videoFile, cfg.port, cfg.streamPath, cfg.loop)
+	go runFFmpegLoop(ctx, cfg.videoFile, cfg.port, cfg.streamPath, cfg.loop, cfg.copyVideo)
 
 	return nil
 }
