@@ -122,9 +122,12 @@ async def lifespan(app: FastAPI):
     # --- Inicializace detektoru osob ---
     # PersonDetector načte YOLO model ze zadané cesty a nastaví práh
     # spolehlivosti detekcí dle konfigurace.
+    # inference_scale=0.5 zmenšuje snímek na 50% rozlišení před YOLO detekci,
+    # což výrazně zrychluje inferenci (~4x) s acceptabilní ztrátou přesnosti.
     detector = PersonDetector(
         model_path=config.YOLO_MODEL,
         confidence=config.CONFIDENCE_THRESHOLD,
+        inference_scale=0.5,
     )
 
     # --- Inicializace rekordéru videa ---
@@ -338,8 +341,10 @@ async def mjpeg_stream():
                 #   \r\n                  ← oddělovač před dalším boundary
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
 
-            # Throttling na ~30 FPS (1/30 ≈ 33 ms mezi snímky).
-            await asyncio.sleep(1 / 30)
+            # Throttling na ~60 FPS (1/60 ≈ 16,7 ms mezi snímky).
+            # Vyšší frame rate zlepšuje hladkost videa i když FPS strojů je nižší;
+            # browser interpoluje chybějící snímky a stream vypadá plynuleji.
+            await asyncio.sleep(1 / 60)
 
     return StreamingResponse(
         generate(),

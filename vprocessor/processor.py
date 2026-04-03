@@ -59,8 +59,9 @@ RTSP_RETRY_DELAY = 2.0  # sekundy mezi pokusy o reconnect
 RTSP_READ_TIMEOUT_MS = 2_000  # ms – max. čas blokování jednoho cap.read()
 
 # Kvalita JPEG komprese při kódování snímků (rozsah 0–100, vyšší = lepší kvalita).
-# Hodnota 85 je dobrý kompromis mezi velikostí souboru a vizuální kvalitou.
-JPEG_QUALITY = 85  # kvalita JPEG kódování (0–100)
+# Hodnota 90 poskytuje vyšší vizuální kvalitu, která je klíčová pro viditelnosti
+# pomalých pohybů a zmenšení zápasů (artifacts) při nižších frame ratech.
+JPEG_QUALITY = 90  # kvalita JPEG kódování (0–100)
 
 # Potlačení vlastních C-úrovňových WARNING zpráv OpenCV (např. "backend is generally
 # available but can't be used to capture by name"), které obcházejí Python logging.

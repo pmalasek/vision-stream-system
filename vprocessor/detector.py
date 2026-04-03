@@ -63,7 +63,7 @@ class PersonDetector:
       - vrácení strukturovaných metadat všech detekovaných osob.
     """
 
-    def __init__(self, model_path: str, confidence: float) -> None:
+    def __init__(self, model_path: str, confidence: float, inference_scale: float = 1.0) -> None:
         """Načte model YOLOv8 ze souboru vah a připraví detektor.
 
         Args:
@@ -72,14 +72,22 @@ class PersonDetector:
                         váhy automaticky stáhne, pokud nejsou přítomny lokálně.
             confidence: Minimální práh spolehlivosti detekce (hodnota 0.0 – 1.0).
                         Detekce s nižší hodnotou jsou zahozeny.
+            inference_scale: Škálovací faktor pro zmenšení snímku před YOLO inferencí.
+                        Výchozí 1.0 znamená žádné zmenšení. Hodnota 0.5 snižuje snímek
+                        na 50% rozlišení, což výrazně zrychluje inferenci.
+                        Výsledné detekce jsou automaticky škálovány zpět
+                        na původní rozměry snímku.
         """
         # Uložení prahu spolehlivosti pro pozdější použití při inferenci.
         self.confidence = confidence
+        # Uložení škálovacího faktoru pro zmenšení snímku.
+        self.inference_scale = inference_scale
 
         logger.info(
-            "Načítám model YOLO ze souboru '%s' (confidence=%.2f) …",
+            "Načítám model YOLO ze souboru '%s' (confidence=%.2f, inference_scale=%.2f) …",
             model_path,
             confidence,
+            inference_scale,
         )
 
         # ---------------------------------------------------------------
@@ -168,23 +176,34 @@ class PersonDetector:
         Returns:
             Dvojice (annotated_frame, detections):
               - annotated_frame: Kopie snímku *frame* s vykreslnými rámečky
-                                 a popisky detekovaných osob.
+                                 a popisky detekovaných osob (v původním rozlišení).
               - detections: Seznam slovníků, každý s klíči
                   ``x1``, ``y1``, ``x2``, ``y2`` (souřadnice rohů rámečku)
-                  a ``confidence`` (spolehlivost detekce) – vše jako float.
+                  a ``confidence`` (spolehlivost detekce) – vše jako float
+                  (souřadnice v původní velikosti snímku).
         """
         # Pracujeme s kopií snímku, aby původní data zůstala nezměněna.
         annotated = frame.copy()
+        frame_height, frame_width = frame.shape[:2]
 
         # Seznam pro shromáždění metadat všech detekovaných osob v tomto snímku.
         detections: list[dict] = []
+
+        # Zmenšení snímku pro zrychlení inference (pokud je nastaven inference_scale < 1.0)
+        inference_frame = frame
+        if self.inference_scale < 1.0:
+            scaled_height = int(frame_height * self.inference_scale)
+            scaled_width = int(frame_width * self.inference_scale)
+            inference_frame = cv2.resize(
+                frame, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA
+            )
 
         # Spuštění inference modelu YOLO:
         #   - conf: minimální práh spolehlivosti (detekce pod touto hodnotou jsou zahozeny)
         #   - classes: omezení inference pouze na třídu 0 (osoba) – snižuje zbytečnou práci
         #   - verbose: potlačení výpisu Ultralytics do konzole při každém snímku
         results = self.model(
-            frame,
+            inference_frame,
             conf=self.confidence,
             classes=[PERSON_CLASS_ID],
             verbose=False,
@@ -214,7 +233,17 @@ class PersonDetector:
 
                 # Souřadnice ohraničujícího rámečku ve formátu xyxy (levý horní
                 # a pravý dolní roh) – převedeny na celá čísla pro práci s pixely.
-                x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0])
+
+                # Škálování souřadnic zpět na původní rozměry, pokud byl snímek zmenšen
+                if self.inference_scale < 1.0:
+                    x1 = x1 / self.inference_scale
+                    y1 = y1 / self.inference_scale
+                    x2 = x2 / self.inference_scale
+                    y2 = y2 / self.inference_scale
+
+                # Převod na celá čísla pro vykreslení
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
                 # Uložení metadat detekce do výsledného seznamu.
                 # Spolehlivost zaokrouhlujeme na 4 desetinná místa pro úsporný přenos.
