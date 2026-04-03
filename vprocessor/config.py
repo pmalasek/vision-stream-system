@@ -96,6 +96,10 @@ class Config:
     # 1 = flush každého snímku (nejbezpečnější, ale pomalejší).
     METADATA_FLUSH_EVERY: int = int(os.getenv("METADATA_FLUSH_EVERY", "1"))
 
+    # Povolit průběžné ukládání výstupů (MP4 + JSONL) na disk.
+    # Pro čistý výkonový benchmark lze nastavit false.
+    RECORD_OUTPUT: bool = _env_bool("RECORD_OUTPUT", True)
+
     # Zapnutí podrobného profilování pipeline po krocích (detect/encode/write/emit).
     # Pokud je True, v logu se periodicky vypisují průměrné časy jednotlivých kroků.
     PROFILE_PIPELINE: bool = _env_bool("PROFILE_PIPELINE", False)

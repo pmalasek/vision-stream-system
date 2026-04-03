@@ -138,6 +138,7 @@ async def lifespan(app: FastAPI):
         segment_duration_minutes=config.SEGMENT_DURATION_MINUTES,
         max_segments=config.MAX_SEGMENTS,
         metadata_flush_every=config.METADATA_FLUSH_EVERY,
+        record_output=config.RECORD_OUTPUT,
     )
 
     # --- Sestavení VideoProcessoru ---
@@ -462,6 +463,8 @@ async def api_detections(limit: int = 100, offset: int = 0):
 
     # Cesta k JSONL souboru metadat pro aktuální session, jak ji zná rekordér.
     metadata_path = processor.recorder.metadata_path
+    if not metadata_path:
+        return []
 
     try:
         # Asynchronní čtení souboru – neblokujeme event loop.

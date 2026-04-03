@@ -76,6 +76,7 @@ class VideoRecorder:
         segment_duration_minutes: int = 10,
         max_segments: int = 3,
         metadata_flush_every: int = 1,
+        record_output: bool = True,
     ) -> None:
         """Připraví výstupní adresář pro aktuální nahrávací sezení.
 
@@ -101,6 +102,7 @@ class VideoRecorder:
         self._max_segments = max_segments
         self._metadata_flush_every = max(1, metadata_flush_every)
         self._metadata_pending_writes = 0
+        self._record_output = record_output
 
         # Vygenerujeme časovou značku pro pojmenování adresáře sezení.
         # Formát je kompatibilní s názvem adresáře na všech platformách
@@ -130,7 +132,11 @@ class VideoRecorder:
         # ale jde o obranné programování).
         self._metadata_file = open(self.metadata_path, "a", encoding="utf-8")  # noqa: WPS515
 
-        logger.info("VideoRecorder session started → dir='%s'", self.session_dir)
+        logger.info(
+            "VideoRecorder session started → dir='%s' (record_output=%s)",
+            self.session_dir,
+            self._record_output,
+        )
 
     # ------------------------------------------------------------------
     # Veřejné rozhraní (Public API)
@@ -166,6 +172,10 @@ class VideoRecorder:
         # Zkontrolujeme, zda neuplynula délka segmentu – pokud ano, rotujeme.
         if time.monotonic() - self._segment_start_time >= self._segment_duration_seconds:
             self._rotate_segment()
+
+        # Režim výkonového benchmarku: bez průběžného zápisu na disk.
+        if not self._record_output:
+            return
 
         # Pokud ještě nebyl VideoWriter inicializován, uděláme to nyní –
         # rozměry snímku jsou nyní k dispozici.
