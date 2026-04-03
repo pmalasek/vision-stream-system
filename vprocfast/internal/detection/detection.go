@@ -31,6 +31,11 @@ type workerResponse struct {
 	Error      string            `json:"error"`
 }
 
+// NewWorker spustí Python proces pro inferenci a připraví pipes pro IPC.
+//
+// Protokol:
+// - vstup: [4-byte big-endian délka][JPEG payload]
+// - výstup: jedna JSON řádka s polem detections nebo chybou.
 func NewWorker(cfg config.Config) (*Worker, error) {
 	if strings.TrimSpace(cfg.PythonExecutable) == "" {
 		return nil, fmt.Errorf("python executable is empty")
@@ -84,6 +89,8 @@ func NewWorker(cfg config.Config) (*Worker, error) {
 	}, nil
 }
 
+// DetectJPEG pošle snímek workeru a vrátí detekce.
+// Volání je serializované mutexem, protože worker běží sekvenčně nad jedním stdin/stdout.
 func (w *Worker) DetectJPEG(jpg []byte) ([]model.Detection, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -116,6 +123,7 @@ func (w *Worker) DetectJPEG(jpg []byte) ([]model.Detection, error) {
 	return resp.Detections, nil
 }
 
+// Close ukončí worker proces a uvolní související prostředky.
 func (w *Worker) Close() {
 	if w == nil || w.cmd == nil {
 		return
@@ -129,6 +137,8 @@ func (w *Worker) Close() {
 	_ = w.cmd.Wait()
 }
 
+// FakeDetections vytvoří deterministické syntetické detekce pro vývoj a testy.
+// Umožňuje běh pipeline bez reálného modelu/inferenčního backendu.
 func FakeDetections(cfg config.Config, frameID int64, frameW, frameH int) []model.Detection {
 	if !cfg.EnableDetection {
 		return []model.Detection{}

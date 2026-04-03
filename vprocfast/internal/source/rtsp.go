@@ -18,6 +18,10 @@ type RTSPConsumerOptions struct {
 	OnStarted     func()
 }
 
+// ConsumeRTSP připojí ffmpeg k RTSP streamu a předává JPEG snímky callbacku.
+//
+// Funkce je blokující a běží do zrušení contextu, EOF nebo chyby.
+// Přenos snímků je přes image2pipe (mjpeg) kvůli jednoduché integraci v Go.
 func ConsumeRTSP(ctx context.Context, opts RTSPConsumerOptions, onFrame func([]byte) error) error {
 	if onFrame == nil {
 		return fmt.Errorf("onFrame callback is required")
@@ -112,6 +116,8 @@ func ConsumeRTSP(ctx context.Context, opts RTSPConsumerOptions, onFrame func([]b
 	}
 }
 
+// readNextJPEG čte z byte streamu další kompletní JPEG (SOI..EOI).
+// Je robustní vůči arbitrárnímu dělení chunků na stdin/stdout pipe.
 func readNextJPEG(r *bufio.Reader) ([]byte, error) {
 	for {
 		b, err := r.ReadByte()

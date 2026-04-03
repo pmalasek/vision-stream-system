@@ -10,26 +10,31 @@ import (
 )
 
 type Config struct {
-	Host                string
-	Port                int
-	OutputDir           string
-	FPS                 int
-	ConfidenceThreshold float64
-	EnableDetection     bool
-	DetectionBackend    string
-	DetectEveryN        int
-	SourceMode          string
-	RTSPURL             string
-	RTSPTransport       string
-	FFmpegPath          string
-	JPEGQuality         int
-	PythonExecutable    string
-	DetectorScript      string
-	YOLOModel           string
-	InferenceScale      float64
-	YOLOImgSz           int
+	Host                   string
+	Port                   int
+	OutputDir              string
+	SegmentDurationMinutes int
+	MaxSegments            int
+	RecordOutput           bool
+	FPS                    int
+	ConfidenceThreshold    float64
+	EnableDetection        bool
+	DetectionBackend       string
+	DetectEveryN           int
+	SourceMode             string
+	RTSPURL                string
+	RTSPTransport          string
+	FFmpegPath             string
+	JPEGQuality            int
+	PythonExecutable       string
+	DetectorScript         string
+	YOLOModel              string
+	InferenceScale         float64
+	YOLOImgSz              int
 }
 
+// getenv načte hodnotu z prostředí.
+// Priorita: VPROCFAST_<KEY> -> <KEY> -> fallback.
 func getenv(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv("VPROCFAST_" + key)); v != "" {
 		return v
@@ -41,6 +46,8 @@ func getenv(key, fallback string) string {
 	return v
 }
 
+// getenvInt načte integer z prostředí se stejnou prioritou klíčů jako getenv.
+// Při nevalidní hodnotě vrací fallback.
 func getenvInt(key string, fallback int) int {
 	v := strings.TrimSpace(os.Getenv("VPROCFAST_" + key))
 	if v == "" {
@@ -56,6 +63,8 @@ func getenvInt(key string, fallback int) int {
 	return n
 }
 
+// getenvFloat64 načte float64 z prostředí se stejnou prioritou klíčů jako getenv.
+// Při nevalidní hodnotě vrací fallback.
 func getenvFloat64(key string, fallback float64) float64 {
 	v := strings.TrimSpace(os.Getenv("VPROCFAST_" + key))
 	if v == "" {
@@ -71,6 +80,8 @@ func getenvFloat64(key string, fallback float64) float64 {
 	return n
 }
 
+// getenvBool načte bool z prostředí.
+// Akceptuje tvary: 1/0, true/false, yes/no, on/off.
 func getenvBool(key string, fallback bool) bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("VPROCFAST_" + key)))
 	if v == "" {
@@ -89,6 +100,8 @@ func getenvBool(key string, fallback bool) bool {
 	}
 }
 
+// moduleDir vrací absolutní cestu k adresáři tohoto souboru.
+// Používá se pro robustní skládání defaultních relativních cest v projektu.
 func moduleDir() string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -97,6 +110,7 @@ func moduleDir() string {
 	return filepath.Dir(file)
 }
 
+// firstExistingPath vrátí první existující cestu ze seznamu kandidátů.
 func firstExistingPath(paths ...string) string {
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {
@@ -109,6 +123,8 @@ func firstExistingPath(paths ...string) string {
 	return ""
 }
 
+// defaultPythonExecutable najde rozumný výchozí Python interpreter
+// (lokální venv, python3 v PATH, případně python).
 func defaultPythonExecutable() string {
 	base := moduleDir()
 	candidates := []string{
@@ -127,14 +143,22 @@ func defaultPythonExecutable() string {
 	return "python3"
 }
 
+// defaultDetectorScript najde výchozí skript Python workeru detekce.
 func defaultDetectorScript() string {
 	base := moduleDir()
-	if p := firstExistingPath(filepath.Join(base, "..", "..", "detect_worker.py")); p != "" {
+	if p := firstExistingPath(
+		filepath.Join(base, "..", "..", "py_module", "detect_worker.py"),
+		filepath.Join(base, "..", "..", "detect_worker.py"), // backward-compat fallback
+	); p != "" {
 		return p
 	}
-	return filepath.Join(base, "..", "..", "detect_worker.py")
+	return filepath.Join(base, "..", "..", "py_module", "detect_worker.py")
 }
 
+// Load načte konfiguraci z prostředí a aplikuje validaci + defaulty.
+//
+// Podporuje prefixed i neprefixed proměnné (např. PORT i VPROCFAST_PORT)
+// kvůli jednodušší integraci s různými nasazeními.
 func Load() Config {
 	fps := getenvInt("FPS", 10)
 	if fps <= 0 {
@@ -191,24 +215,37 @@ func Load() Config {
 		yoloImgSz = 640
 	}
 
+	segmentDurationMinutes := getenvInt("SEGMENT_DURATION_MINUTES", 10)
+	if segmentDurationMinutes <= 0 {
+		segmentDurationMinutes = 10
+	}
+
+	maxSegments := getenvInt("MAX_SEGMENTS", 3)
+	if maxSegments <= 0 {
+		maxSegments = 3
+	}
+
 	return Config{
-		Host:                getenv("HOST", "0.0.0.0"),
-		Port:                port,
-		OutputDir:           getenv("OUTPUT_DIR", "./output"),
-		FPS:                 fps,
-		ConfidenceThreshold: getenvFloat64("CONFIDENCE_THRESHOLD", 0.5),
-		EnableDetection:     getenvBool("ENABLE_DETECTION", true),
-		DetectionBackend:    detectionBackend,
-		DetectEveryN:        detectEveryN,
-		SourceMode:          sourceMode,
-		RTSPURL:             getenv("RTSP_URL", "rtsp://vstreamer:8554/live"),
-		RTSPTransport:       transport,
-		FFmpegPath:          getenv("FFMPEG_PATH", "ffmpeg"),
-		JPEGQuality:         jpegQuality,
-		PythonExecutable:    getenv("PYTHON_EXECUTABLE", defaultPythonExecutable()),
-		DetectorScript:      getenv("DETECTOR_SCRIPT", defaultDetectorScript()),
-		YOLOModel:           getenv("YOLO_MODEL", "models/yolov8n.pt"),
-		InferenceScale:      inferenceScale,
-		YOLOImgSz:           yoloImgSz,
+		Host:                   getenv("HOST", "0.0.0.0"),
+		Port:                   port,
+		OutputDir:              getenv("OUTPUT_DIR", "./output"),
+		SegmentDurationMinutes: segmentDurationMinutes,
+		MaxSegments:            maxSegments,
+		RecordOutput:           getenvBool("RECORD_OUTPUT", true),
+		FPS:                    fps,
+		ConfidenceThreshold:    getenvFloat64("CONFIDENCE_THRESHOLD", 0.5),
+		EnableDetection:        getenvBool("ENABLE_DETECTION", true),
+		DetectionBackend:       detectionBackend,
+		DetectEveryN:           detectEveryN,
+		SourceMode:             sourceMode,
+		RTSPURL:                getenv("RTSP_URL", "rtsp://vstreamer:8554/live"),
+		RTSPTransport:          transport,
+		FFmpegPath:             getenv("FFMPEG_PATH", "ffmpeg"),
+		JPEGQuality:            jpegQuality,
+		PythonExecutable:       getenv("PYTHON_EXECUTABLE", defaultPythonExecutable()),
+		DetectorScript:         getenv("DETECTOR_SCRIPT", defaultDetectorScript()),
+		YOLOModel:              getenv("YOLO_MODEL", "models/yolov8n.pt"),
+		InferenceScale:         inferenceScale,
+		YOLOImgSz:              yoloImgSz,
 	}
 }

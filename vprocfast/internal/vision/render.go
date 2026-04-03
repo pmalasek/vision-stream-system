@@ -10,6 +10,8 @@ import (
 	"vprocfast/internal/model"
 )
 
+// AnnotateJPEG dekóduje JPEG, nechá zavolat detekci a vykreslí boxy do výstupu.
+// Vrací anotovaný JPEG a seznam detekcí použitých pro vykreslení.
 func AnnotateJPEG(
 	jpg []byte,
 	quality int,
@@ -35,6 +37,8 @@ func AnnotateJPEG(
 	return out.Bytes(), detections
 }
 
+// BuildSyntheticFrameJPEG vytvoří syntetický testovací snímek včetně boxů.
+// Slouží pro režim SOURCE_MODE=synthetic.
 func BuildSyntheticFrameJPEG(frameID int64, evt model.DetectionEvent, quality int) []byte {
 	const (
 		width  = 1280
@@ -62,6 +66,7 @@ func BuildSyntheticFrameJPEG(frameID int64, evt model.DetectionEvent, quality in
 	return buf.Bytes()
 }
 
+// toRGBA převede obecný image.Image na mutable RGBA buffer.
 func toRGBA(src image.Image) *image.RGBA {
 	bounds := src.Bounds()
 	dst := image.NewRGBA(bounds)
@@ -69,6 +74,7 @@ func toRGBA(src image.Image) *image.RGBA {
 	return dst
 }
 
+// drawBox vykreslí obrys obdélníku o tloušťce 2 px.
 func drawBox(img *image.RGBA, x1, y1, x2, y2 int, c color.Color) {
 	if x1 < 0 {
 		x1 = 0

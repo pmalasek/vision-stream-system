@@ -18,7 +18,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# detect_worker.py now lives in vprocfast/py_module/, so repository root is
+# three levels up: <repo>/vprocfast/py_module/detect_worker.py -> <repo>
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 VPROCESSOR_DIR = REPO_ROOT / "vprocessor"
 if str(VPROCESSOR_DIR) not in sys.path:
     sys.path.insert(0, str(VPROCESSOR_DIR))

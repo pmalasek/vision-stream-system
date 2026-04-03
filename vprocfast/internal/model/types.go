@@ -1,5 +1,7 @@
 package model
 
+// Detection reprezentuje jeden bounding box detekované osoby
+// v pixelových souřadnicích snímku.
 type Detection struct {
 	X1         int     `json:"x1"`
 	Y1         int     `json:"y1"`
@@ -8,6 +10,7 @@ type Detection struct {
 	Confidence float64 `json:"confidence"`
 }
 
+// DetectionEvent je payload posílaný klientům pro konkrétní snímek.
 type DetectionEvent struct {
 	FrameID     int64       `json:"frame_id"`
 	Timestamp   float64     `json:"timestamp"`
@@ -15,6 +18,7 @@ type DetectionEvent struct {
 	Detections  []Detection `json:"detections"`
 }
 
+// StatsEvent reprezentuje agregované runtime metriky backendu.
 type StatsEvent struct {
 	FPS             float64 `json:"fps"`
 	TotalFrames     int64   `json:"total_frames"`

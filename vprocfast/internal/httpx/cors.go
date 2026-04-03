@@ -5,6 +5,7 @@ import (
 	"strings"
 )
 
+// WrapCORS obalí endpoint (HandlerFunc) o CORS hlavičky a obsluhu preflightu.
 func WrapCORS(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setCORSHeaders(w, r)
@@ -18,6 +19,7 @@ func WrapCORS(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// WrapCORSHandler je varianta WrapCORS pro obecný http.Handler.
 func WrapCORSHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setCORSHeaders(w, r)
@@ -31,6 +33,8 @@ func WrapCORSHandler(h http.Handler) http.Handler {
 	})
 }
 
+// setCORSHeaders nastavuje CORS pouze pro lokální originy.
+// Cílem je bezpečný lokální vývoj bez otevření API pro libovolné domény.
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {

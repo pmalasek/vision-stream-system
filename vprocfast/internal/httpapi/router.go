@@ -18,6 +18,15 @@ type Dependencies struct {
 	ConnectedClients func() int64
 }
 
+// NewMux postaví HTTP routy kompatibilní s očekáváním dashboardu/vprocessor API.
+//
+// Endpoints:
+// - /health
+// - /api/stats
+// - /api/detections
+// - /webrtc/offer (MVP stub)
+// - /stream (MJPEG)
+// - /socket.io/ (pokud je předán SocketHandler)
 func NewMux(deps Dependencies) *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -93,6 +102,8 @@ func NewMux(deps Dependencies) *http.ServeMux {
 	return mux
 }
 
+// parseInt je tolerantní parser query parametrů.
+// Při chybě vrací 0, což následně řeší validační logika volajícího.
 func parseInt(v string) int {
 	n, _ := strconv.Atoi(v)
 	return n

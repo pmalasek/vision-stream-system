@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +16,7 @@ import (
 	"vprocfast/internal/httpapi"
 	"vprocfast/internal/model"
 	"vprocfast/internal/source"
+	"vprocfast/internal/store"
 	"vprocfast/internal/util"
 	"vprocfast/internal/vision"
 
@@ -35,6 +33,14 @@ type Detection = model.Detection
 type DetectionEvent = model.DetectionEvent
 type StatsEvent = model.StatsEvent
 
+// Processor je hlavní orchestrace běhu backendu.
+//
+// Odpovídá za:
+// - příjem/produkci snímků (synteticky nebo z RTSP),
+// - běh detekce (fake nebo Python worker),
+// - publikaci eventů do Socket.IO,
+// - udržování in-memory historie,
+// - průběžné ukládání segmentů a metadat přes recorder.
 type Processor struct {
 	cfg      Config
 	detector *detection.Worker
@@ -52,29 +58,22 @@ type Processor struct {
 	historyMu sync.RWMutex
 	history   []DetectionEvent
 
-	metaFileMu sync.Mutex
-	metaFile   *os.File
+	recorder *store.SegmentRecorder
 
 	sio *socketio.Server
 }
 
 func newProcessor(cfg Config, sio *socketio.Server) (*Processor, error) {
-	sessionDir := filepath.Join(cfg.OutputDir, time.Now().Format("2006-01-02_15-04-05"))
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create output session dir: %w", err)
-	}
-
-	metaPath := filepath.Join(sessionDir, "detections.jsonl")
-	metaFile, err := os.OpenFile(metaPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	recorder, err := store.NewSegmentRecorder(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open metadata file: %w", err)
+		return nil, fmt.Errorf("failed to initialize segment recorder: %w", err)
 	}
 
 	p := &Processor{
 		cfg:       cfg,
 		startedAt: time.Now(),
 		history:   make([]DetectionEvent, 0, 2048),
-		metaFile:  metaFile,
+		recorder:  recorder,
 		sio:       sio,
 	}
 	if cfg.EnableDetection && cfg.SourceMode == "rtsp" && cfg.DetectionBackend == "python" {
@@ -96,14 +95,13 @@ func (p *Processor) close() {
 	if p.detector != nil {
 		p.detector.Close()
 	}
-	p.metaFileMu.Lock()
-	defer p.metaFileMu.Unlock()
-	if p.metaFile != nil {
-		_ = p.metaFile.Close()
-		p.metaFile = nil
+	if p.recorder != nil {
+		p.recorder.Close()
+		p.recorder = nil
 	}
 }
 
+// start spustí hlavní smyčku podle zvoleného zdroje videa.
 func (p *Processor) start(ctx context.Context) {
 	if p.cfg.SourceMode == "rtsp" {
 		p.startRTSPLoop(ctx)
@@ -112,6 +110,8 @@ func (p *Processor) start(ctx context.Context) {
 	p.startSynthetic(ctx)
 }
 
+// startSynthetic generuje periodicky testovací snímky i detekční události.
+// Používá se jako výchozí režim pro rychlý vývoj bez externích závislostí.
 func (p *Processor) startSynthetic(ctx context.Context) {
 	p.status.Store("streaming")
 	frameInterval := time.Second / time.Duration(p.cfg.FPS)
@@ -141,6 +141,8 @@ func (p *Processor) startSynthetic(ctx context.Context) {
 	}
 }
 
+// startRTSPLoop drží spojení na RTSP zdroj, čte snímky přes ffmpeg a při chybě
+// se pokouší o reconnect.
 func (p *Processor) startRTSPLoop(ctx context.Context) {
 	if strings.TrimSpace(p.cfg.RTSPURL) == "" {
 		log.Printf("[WARN] SOURCE_MODE=rtsp but RTSP_URL is empty; falling back to synthetic")
@@ -197,12 +199,19 @@ func (p *Processor) startRTSPLoop(ctx context.Context) {
 	}
 }
 
+// annotateJPEG vyhodnotí detekce nad JPEG snímkem a vykreslí bounding boxy.
 func (p *Processor) annotateJPEG(frameID int64, jpg []byte) ([]byte, []Detection) {
 	return vision.AnnotateJPEG(jpg, p.cfg.JPEGQuality, func(frameW, frameH int) []model.Detection {
 		return p.detectPeople(frameID, jpg, frameW, frameH)
 	})
 }
 
+// detectPeople vrací detekce osob pro daný snímek.
+//
+// Logika:
+// - respektuje globální ENABLE_DETECTION,
+// - umí řidší detekci přes DETECT_EVERY_N,
+// - preferuje Python backend, při jeho selhání fallback na fake detekce.
 func (p *Processor) detectPeople(frameID int64, jpg []byte, frameW, frameH int) []Detection {
 	if !p.cfg.EnableDetection {
 		return []Detection{}
@@ -217,8 +226,10 @@ func (p *Processor) detectPeople(frameID int64, jpg []byte, frameW, frameH int) 
 	if p.detector != nil {
 		detections, err := p.detector.DetectJPEG(jpg)
 		if err != nil {
-			log.Printf("[WARN] detector worker failed: %v", err)
-			return []Detection{}
+			log.Printf("[WARN] detector worker failed: %v; disabling python detector and falling back to fake detections", err)
+			p.detector.Close()
+			p.detector = nil
+			return detection.FakeDetections(p.cfg, frameID, frameW, frameH)
 		}
 		return detections
 	}
@@ -226,14 +237,18 @@ func (p *Processor) detectPeople(frameID int64, jpg []byte, frameW, frameH int) 
 	return detection.FakeDetections(p.cfg, frameID, frameW, frameH)
 }
 
+// publishFrame aktualizuje interní stav a publikuje detection event klientům.
 func (p *Processor) publishFrame(event DetectionEvent, jpegBytes []byte) {
 	p.setLatestJPEG(jpegBytes)
 	p.appendHistory(event)
-	p.writeJSONL(event)
+	if p.recorder != nil {
+		p.recorder.Write(event, jpegBytes)
+	}
 	p.totalDetections.Add(int64(len(event.Detections)))
 	p.sio.BroadcastToNamespace("/", "detection", event)
 }
 
+// startStatsEmitter vysílá periodické statistiky přes Socket.IO (1x za sekundu).
 func (p *Processor) startStatsEmitter(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -249,6 +264,7 @@ func (p *Processor) startStatsEmitter(ctx context.Context) {
 	}
 }
 
+// currentStats sestaví snapshot provozních metrik backendu.
 func (p *Processor) currentStats() StatsEvent {
 	uptime := time.Since(p.startedAt).Seconds()
 	if uptime <= 0 {
@@ -271,6 +287,7 @@ func (p *Processor) currentStats() StatsEvent {
 	}
 }
 
+// setLatestJPEG atomicky uloží poslední JPEG snímek dostupný pro MJPEG stream.
 func (p *Processor) setLatestJPEG(j []byte) {
 	p.latestJPEGMu.Lock()
 	defer p.latestJPEGMu.Unlock()
@@ -278,6 +295,8 @@ func (p *Processor) setLatestJPEG(j []byte) {
 	p.latestSeq++
 }
 
+// getLatestJPEG vrací kopii posledního JPEG snímku a jeho sekvenční číslo.
+// Kopie je záměrně deep-copy, aby volající neovlivnil interní buffer.
 func (p *Processor) getLatestJPEG() ([]byte, int64) {
 	p.latestJPEGMu.RLock()
 	defer p.latestJPEGMu.RUnlock()
@@ -289,6 +308,7 @@ func (p *Processor) getLatestJPEG() ([]byte, int64) {
 	return cpy, p.latestSeq
 }
 
+// appendHistory přidá event do historie s omezením na fixní velikost.
 func (p *Processor) appendHistory(evt DetectionEvent) {
 	p.historyMu.Lock()
 	defer p.historyMu.Unlock()
@@ -298,6 +318,8 @@ func (p *Processor) appendHistory(evt DetectionEvent) {
 	}
 }
 
+// getHistory vrátí stránkovaný výřez historie detekcí.
+// Hodnoty limit/offset jsou defensivně normalizovány.
 func (p *Processor) getHistory(limit, offset int) []DetectionEvent {
 	if limit < 1 {
 		limit = 100
@@ -326,20 +348,10 @@ func (p *Processor) getHistory(limit, offset int) []DetectionEvent {
 	return out
 }
 
-func (p *Processor) writeJSONL(evt DetectionEvent) {
-	b, err := json.Marshal(evt)
-	if err != nil {
-		return
-	}
-
-	p.metaFileMu.Lock()
-	defer p.metaFileMu.Unlock()
-	if p.metaFile == nil {
-		return
-	}
-	_, _ = p.metaFile.Write(append(b, '\n'))
-}
-
+// main inicializuje konfiguraci, Socket.IO server, processor a HTTP API.
+//
+// Poznámka: .env se načítá pouze pro lokální DX; v kontejneru se očekává,
+// že proměnné dodá orchestrátor (např. Docker Compose).
 func main() {
 	// Lokální UX: načti .env z aktuálního adresáře nebo z parent rootu repozitáře.
 	// V Docker Compose jsou proměnné předány přímo prostředím, tam to ničemu nevadí.

@@ -28,6 +28,7 @@ ENV/
 
 # Output recordings and metadata
 output/
+hls/
 
 # Ultralytics cache and run artifacts
 runs/
