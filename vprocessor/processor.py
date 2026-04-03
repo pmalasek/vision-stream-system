@@ -528,6 +528,7 @@ class VideoProcessor:
         # ── Profilování pipeline (volitelné, řízené konfigurací) ─────────
         profile_enabled: bool = self.config.PROFILE_PIPELINE
         profile_interval: float = max(1.0, self.config.PROFILE_LOG_INTERVAL_SECONDS)
+        detection_enabled: bool = self.config.ENABLE_DETECTION
         detect_every_n: int = max(1, self.config.DETECT_EVERY_N)
         profile_window_start: float = time.time()
         profile_frame_count: int = 0
@@ -539,9 +540,10 @@ class VideoProcessor:
 
         if profile_enabled:
             logger.info(
-                "Pipeline profiling ENABLED (interval=%.1f s, detect_every_n=%d)",
+                "Pipeline profiling ENABLED (interval=%.1f s, detect_every_n=%d, detection_enabled=%s)",
                 profile_interval,
                 detect_every_n,
+                detection_enabled,
             )
 
         try:
@@ -574,7 +576,7 @@ class VideoProcessor:
                 # detector.detect() se volá jen na každém N-tém snímku.
                 # U mezilehlých snímků posíláme do UI čistý obraz bez boxů.
                 detect_start_perf = time.perf_counter()
-                do_detect = ((self.frame_count - 1) % detect_every_n) == 0
+                do_detect = detection_enabled and (((self.frame_count - 1) % detect_every_n) == 0)
                 if do_detect:
                     annotated_frame, detections = self.detector.detect(frame)
                     # Uložení detekcí pro HTTP endpoint /api/detections.

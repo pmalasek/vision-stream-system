@@ -100,6 +100,10 @@ class Config:
     # 1 = inference na každém snímku (výchozí chování), 2/3 = vyšší FPS.
     DETECT_EVERY_N: int = int(os.getenv("DETECT_EVERY_N", "1"))
 
+    # Globální vypínač detekce (YOLO inference).
+    # false = stream bez detekce, vhodné pro benchmark přenosové části pipeline.
+    ENABLE_DETECTION: bool = _env_bool("ENABLE_DETECTION", True)
+
     # Jak často flushovat JSONL metadata na disk (po kolika snímcích).
     # 1 = flush každého snímku (nejbezpečnější, ale pomalejší).
     METADATA_FLUSH_EVERY: int = int(os.getenv("METADATA_FLUSH_EVERY", "1"))
