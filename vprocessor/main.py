@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -73,14 +74,26 @@ async def lifespan(app: FastAPI):
     logger.info("=== vprocessor shutting down ===")
 
     if processor is not None:
+        # Signal the worker thread to stop (sets running=False, fires
+        # _stop_event, releases _cap).  Does NOT block – we wait below.
         await processor.stop()
 
-    if _processor_task is not None and not _processor_task.done():
-        _processor_task.cancel()
-        try:
+    if _processor_task is not None:
+        if not _processor_task.done():
+            # Give the worker thread up to 8 s to exit gracefully before
+            # we escalate to a hard cancel.  asyncio.wait() never cancels
+            # tasks on its own, so the thread keeps its chance to clean up.
+            done, _ = await asyncio.wait({_processor_task}, timeout=8.0)
+            if not done:
+                logger.warning(
+                    "Processor task did not stop within 8 s – force-cancelling."
+                )
+                _processor_task.cancel()
+
+        # Await the task to consume its result/exception so asyncio doesn't
+        # log "Task exception was never retrieved" warnings.
+        with contextlib.suppress(Exception):
             await _processor_task
-        except asyncio.CancelledError:
-            pass
 
     logger.info("=== vprocessor shutdown complete ===")
 

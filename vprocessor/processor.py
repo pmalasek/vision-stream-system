@@ -14,7 +14,7 @@ from recorder import VideoRecorder
 logger = logging.getLogger(__name__)
 
 RTSP_RETRY_DELAY = 2.0  # seconds between reconnect attempts
-RTSP_READ_TIMEOUT_MS = 5_000  # ms – max time a single cap.read() may block
+RTSP_READ_TIMEOUT_MS = 2_000  # ms – max time a single cap.read() may block
 JPEG_QUALITY = 85  # cv2 JPEG encode quality (0-100)
 
 # Suppress OpenCV's own C-level WARN messages (e.g. "backend is generally
@@ -149,17 +149,25 @@ class VideoProcessor:
         )
 
     async def stop(self) -> None:
-        """Signal the processing loop to stop and wait for the thread to exit.
+        """Signal the processing loop to stop.
 
-        Steps are ordered to minimise the time between this call and the
-        worker thread actually exiting:
+        This method only *signals* – it does **not** block waiting for the
+        worker thread to exit.  The caller (``main.py`` lifespan) is
+        responsible for waiting by monitoring ``_processor_task``.
 
+        Steps
+        -----
         1. ``self.running = False`` — loop guard + post-read guard.
-        2. ``_stop_event.set()`` — wakes interruptible sleeps instantly.
-        3. ``self._cap.release()`` — closes the RTSP socket so cap.read()
-           returns immediately instead of blocking until the next frame.
-        4. ``executor.shutdown(wait=True)`` (offloaded so the event loop is
-           not blocked while we wait for the thread to finish).
+        2. ``_stop_event.set()`` — wakes every ``_stop_event.wait()`` call
+           (used instead of ``time.sleep``) so they return immediately.
+        3. ``_cap.release()`` — closes the RTSP socket so a blocking
+           ``cap.read()`` returns right away with ``ret=False``.
+           Guarded by ``_cap_lock`` to avoid racing with the reconnect
+           section of the worker thread.
+        4. ``executor.shutdown(wait=False)`` — marks the pool as shutting
+           down so no new tasks can be submitted.  Because we've already
+           signalled the worker, it will exit on its own; we don't block
+           here.  Actual completion is tracked via ``_processor_task``.
         """
         logger.info("Stopping VideoProcessor …")
         self.running = False
@@ -179,11 +187,11 @@ class VideoProcessor:
                     logger.debug("Ignoring error while releasing cap on stop: %s", exc)
                 self._cap = None
 
-        # Run the blocking shutdown in the default thread-pool so the event
-        # loop stays responsive while we wait for the worker thread to exit.
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._executor.shutdown, True)
-        logger.info("VideoProcessor stopped.")
+        # Mark the executor as shut-down (non-blocking).  The worker thread
+        # will exit naturally after seeing running=False / _stop_event; the
+        # executor pool is freed once that happens.
+        self._executor.shutdown(wait=False)
+        logger.info("VideoProcessor stop signal sent.")
 
     def get_latest_frame(self) -> bytes | None:
         """Return the most recent JPEG-encoded frame (thread-safe)."""
@@ -270,6 +278,12 @@ class VideoProcessor:
                     self.status = "streaming"
 
                 # ── Read a frame ───────────────────────────────────────
+                # Guard: if stop() was called while we were in the reconnect
+                # block (so _cap was None at the time and wasn't released),
+                # bail out *before* starting a new blocking read.
+                if self._stop_event.is_set():
+                    break
+
                 ret, frame = cap.read()
 
                 # Check the stop flag before starting any heavy work.
