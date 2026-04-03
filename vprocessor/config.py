@@ -116,6 +116,13 @@ class Config:
     # takže není blokován detekcí / zápisem na disk v processing vlákně.
     STREAM_FROM_RAW: bool = _env_bool("STREAM_FROM_RAW", True)
 
+    # Škálování MJPEG výstupu pro /stream (0.0–1.0).
+    # Menší hodnota výrazně snižuje náklady na JPEG encode a přenos.
+    STREAM_SCALE: float = float(os.getenv("STREAM_SCALE", "1.0"))
+
+    # Kvalita JPEG pro /stream (0–100). Nižší hodnota = menší CPU + síťový tok.
+    STREAM_JPEG_QUALITY: int = int(os.getenv("STREAM_JPEG_QUALITY", "80"))
+
     # Povolit průběžné ukládání výstupů (MP4 + JSONL) na disk.
     # Pro čistý výkonový benchmark lze nastavit false.
     RECORD_OUTPUT: bool = _env_bool("RECORD_OUTPUT", True)

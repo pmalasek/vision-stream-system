@@ -235,6 +235,34 @@ class VideoProcessor:
         # probudila zpracovatelské vlákno blokující v _raw_frame_event.wait().
         self._raw_frame_event = threading.Event()
 
+    def _encode_stream_frame(self, frame: np.ndarray) -> bytes | None:
+        """Zakóduje frame pro MJPEG /stream s volitelným downscalem a kvalitou.
+
+        Tato cesta je optimalizovaná pro plynulost live streamu a může mít
+        jinou kvalitu/rozlišení než interní processing pipeline.
+        """
+        stream_frame = frame
+        stream_scale = float(self.config.STREAM_SCALE)
+        if 0.0 < stream_scale < 1.0:
+            height, width = frame.shape[:2]
+            scaled_width = max(1, int(width * stream_scale))
+            scaled_height = max(1, int(height * stream_scale))
+            stream_frame = cv2.resize(
+                frame,
+                (scaled_width, scaled_height),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        stream_jpeg_quality = max(30, min(100, int(self.config.STREAM_JPEG_QUALITY)))
+        ok, buffer = cv2.imencode(
+            ".jpg",
+            stream_frame,
+            [cv2.IMWRITE_JPEG_QUALITY, stream_jpeg_quality],
+        )
+        if not ok:
+            return None
+        return buffer.tobytes()
+
     # ──────────────────────────────────────────────────────────────────────────
     # Veřejné asynchronní API
     # ──────────────────────────────────────────────────────────────────────────
@@ -498,11 +526,8 @@ class VideoProcessor:
                     self._raw_frame_queue.append(frame)
 
                 if self.config.STREAM_FROM_RAW:
-                    ok, buffer = cv2.imencode(
-                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-                    )
-                    if ok:
-                        jpeg_bytes = buffer.tobytes()
+                    jpeg_bytes = self._encode_stream_frame(frame)
+                    if jpeg_bytes is not None:
                         with self._frame_lock:
                             self.latest_frame = jpeg_bytes
                             self._latest_frame_seq += 1
