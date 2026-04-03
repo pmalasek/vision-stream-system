@@ -41,7 +41,8 @@ Vývojový server automaticky přesměrovává tyto cesty na `vprocessor`:
 | `VITE_PROCESSOR_URL` | `http://localhost:8000` | URL služby `vprocessor` |
 | `VITE_STREAM_URL` | `${VITE_PROCESSOR_URL}/stream` | Volitelná přímá URL MJPEG streamu; umožní obejít dashboard nginx proxy |
 | `VITE_HLS_URL` | `/hls/stream.m3u8` | URL HLS playlistu (doporučeno relativně, funguje v HTTP i HTTPS) |
- | `VITE_VIDEO_MODE` | `hls` | Režim přehrávání videa: `hls` | `webrtc` | `mjpeg` |
+| `VITE_VIDEO_MODE` | `hls` | Režim přehrávání videa: `hls`, `webrtc`, `mjpeg` |
+| `VITE_METADATA_DELAY_MS` | `2500` | Zpoždění metadat proti videu v HLS režimu (ms), pro lepší sync boxů |
 | `VITE_USE_WEBRTC` | `true` | Zapne WebRTC video přehrávání (fallback na MJPEG jen při vypnutí) |
 | `VITE_WEBRTC_URL` | `${VITE_PROCESSOR_URL}` | Volitelná base URL pro WebRTC signaling endpoint `/webrtc/offer` |
 

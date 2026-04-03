@@ -28,6 +28,28 @@ import { useSocket } from "./hooks/useSocket";
 import { useEffect, useRef, useState } from "react";
 import type { DetectionEvent, FrameMetaEvent } from "./types";
 
+function detectionTimestampToMs(value: string | number): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // sekundy vs milisekundy
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+    }
+
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  return null;
+}
+
 /**
  * Základní URL adresa backendu (processor služby).
  *
@@ -71,6 +93,14 @@ const VIDEO_MODE =
     | undefined) ?? "hls";
 
 const USE_WEBRTC = VIDEO_MODE === "webrtc";
+const USE_HLS = VIDEO_MODE === "hls";
+
+// Kompenzace latence HLS přehrávače pro metadata (ms).
+// Typicky 1500–4000 ms dle segmentace a sítě.
+const METADATA_DELAY_MS = Math.max(
+  0,
+  Number(import.meta.env.VITE_METADATA_DELAY_MS ?? 2500),
+);
 
 /**
  * Plná URL adresa MJPEG video streamu.
@@ -112,7 +142,7 @@ export default function App() {
   useEffect(() => {
     if (!latestDetection) return;
 
-    if (!USE_WEBRTC) {
+    if (!USE_WEBRTC && !USE_HLS) {
       setSyncedDetection(latestDetection);
       return;
     }
@@ -147,6 +177,37 @@ export default function App() {
       setSyncedDetection(newestReady);
     }
   }, [videoFrameMeta]);
+
+  useEffect(() => {
+    if (!USE_HLS) return;
+
+    const timer = window.setInterval(() => {
+      const queue = pendingDetectionsRef.current;
+      if (queue.length === 0) return;
+
+      const cutoffMs = Date.now() - METADATA_DELAY_MS;
+      let newestReady: DetectionEvent | null = null;
+      const remaining: DetectionEvent[] = [];
+
+      for (const evt of queue) {
+        const tsMs = detectionTimestampToMs(evt.timestamp);
+        if (tsMs !== null && tsMs <= cutoffMs) {
+          newestReady = evt;
+        } else {
+          remaining.push(evt);
+        }
+      }
+
+      pendingDetectionsRef.current = remaining;
+      if (newestReady) {
+        setSyncedDetection(newestReady);
+      }
+    }, 100);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [USE_HLS]);
 
   return (
     /*
@@ -217,7 +278,7 @@ export default function App() {
             <StatsPanel stats={stats} isConnected={isConnected} />
             {/* Panel s posledním detekčním eventem (bounding boxy, počet osob) */}
             <DetectionPanel
-              detection={USE_WEBRTC ? syncedDetection : latestDetection}
+              detection={USE_WEBRTC || USE_HLS ? syncedDetection : latestDetection}
             />
           </div>
         </div>
