@@ -19,17 +19,18 @@ Systém pro real-time zpracování videa, který detekuje osoby ve video streamu
 
 ## Navržené řešení
 
-Rozdělil jsem si zadání do tří modulů : 
+Rozdělil jsem si zadání do tří modulů :
+
 1. **vStreamer** - Emulátor IP kamery, převede video na H264 stream a zpřístupní přes RTSP
 2. **vProcessor** - Python/FastAPI/YOLOv8 zpracovatelský a SocketIO server - přes RTSP přijímá video stream, přes YOLOv8 jej zpracuje, metadata a video ukládá do output/<YYYY-MM-DD_hh_mm_ss>/ a současně streamuje video přes MJPEG a metadata přes SocketIO na UI.
-3. **vDashboard** - React/Typescript/Tailwind UI - jen zobrazuje video a metadata. 
+3. **vDashboard** - React/Typescript/Tailwind UI - jen zobrazuje video a metadata.
 
 **Kdybych bych navrhoval reálný systém, postupoval bych trochu jinak**:
 
 - Pokud by zpracování probíhalo na serverech (Cloudu), aby by byla možnost škálovat počet vWorkerů v rámci infrastruktury, rozdělil bych vProcessor na :
   - **vServer** - asi bych použil C++ nebo Go - pouze přijímá streamy z vStreamerů (kamer) a předává je ke zpracování vWorkerům, a schraňuje výsledná metadata.
   - **vWorker** - Python/YOLOv8 - samostatný "zpracovávač", který se stará o ukládání a předává zpracovaný stream přímo na vDashboard a metadata pak vServeru, který je přes SocketIO doručí na vDashboard
-- Pokud by zpracování probíhalo v embedded zařízení, poohlédl bych se po nějakém SoC optimalizovaném pro zpracování obrazu, např. MCM-iMX95 (https://www.compulab.com/products/computer-on-modules/mcm-imx95-nxp-i-mx-95-som-smd-system-on-module/#specs) a podle počtu video vstupů bych se nebál jich spojit do virtuálního embedded serveru, kde každý SoC bude zpracovávat jen několik video streamů.
+- Pokud by zpracování probíhalo v embedded zařízení, poohlédl bych se po nějakém SoC optimalizovaném pro zpracování obrazu, např. MCM-iMX95 (<https://www.compulab.com/products/computer-on-modules/mcm-imx95-nxp-i-mx-95-som-smd-system-on-module/#specs>) a podle počtu video vstupů bych se nebál jich spojit do virtuálního embedded serveru, kde každý SoC bude zpracovávat jen několik video streamů.
 
 <p align="center">
   <em>--- Testováno na Lenovo Yoga Slim 7 14APU8 s nainstalovaným Ubuntu 25.10 ---</em>
@@ -37,7 +38,7 @@ Rozdělil jsem si zadání do tří modulů :
 
 ## Architektura
 
-```
+```bash
 ┌─────────────────┐  RTSP :8554    ┌───────────────────────────────┐
 │   vstreamer     │ ─────────────► │         vprocessor            │
 │     (Go)        │                │       (Python/FastAPI)        │
@@ -72,7 +73,10 @@ Rozdělil jsem si zadání do tří modulů :
 |-----------|-------------|------|-------|
 | **vstreamer** | Go + gortsplib + ffmpeg | `8554` (RTSP) | Načte video soubor a streamuje ho jako RTSP stream — chová se jako IP kamera |
 | **vprocessor** | Python + FastAPI + YOLOv8 | `8000` (HTTP) | Zachytává RTSP stream, detekuje osoby, streamuje výsledky přes MJPEG + Socket.IO |
+| **vprocfast** | Go (MVP, synthetic pipeline) | `8001` (HTTP) | Alternativní Go-only procesor s kompatibilním API (`/stream`, `/api/stats`, `/api/detections`, `/socket.io`) |
 | **vdashboard** | React + TypeScript + Tailwind | `3000` (HTTP) | Webový dashboard zobrazující živý stream a real-time metadata detekcí |
+
+`vProcFast` vznikl jako **testovací prostředí pro spolupráci Go a Pythonu**: cílem je mít rychlý, jednoduše laditelný Go backend se stejným API kontraktem jako `vprocessor`, na kterém lze bezpečně ověřovat změny v pipeline, streamingu a dashboardu bez nutnosti hned zasahovat do produkčnější Python/YOLO části.
 
 ---
 
@@ -100,7 +104,21 @@ docker compose up --build
 
 ### 4. Otevření dashboardu
 
-Přejdi na **http://localhost:3000** v prohlížeči.
+Přejdi na **<http://localhost:3000>** v prohlížeči.
+
+### 5. Volitelné spuštění vProcFast (Go-only)
+
+`vProcFast` je dostupný jako volitelný Compose profil `fast`:
+
+```bash
+docker compose --profile fast up --build vprocfast
+```
+
+Health endpoint:
+
+```bash
+curl http://localhost:8001/health
+```
 
 ### Proměnné prostředí
 
@@ -282,6 +300,7 @@ vstreamer  ──── RTSP (H.264) ────►  vprocessor
 | vstreamer | UDP RTP | 8556 | UDP transport pro RTP pakety |
 | vstreamer | UDP RTCP | 8557 | UDP transport pro RTCP pakety |
 | vprocessor | HTTP / WS | 8000 | `http://localhost:8000` |
+| vprocfast | HTTP / WS | 8001 | `http://localhost:8001` |
 | vdashboard | HTTP | 3000 | `http://localhost:3000` |
 
 ---
@@ -307,6 +326,11 @@ vision-stream-system/
 │   ├── recorder.py
 │   ├── config.py
 │   ├── requirements.txt
+│   ├── Dockerfile
+│   └── README.md
+├── vprocfast/                  ← Go-only MVP zpracovatelská služba
+│   ├── go.mod
+│   ├── main.go
 │   ├── Dockerfile
 │   └── README.md
 └── vdashboard/                 ← React dashboard

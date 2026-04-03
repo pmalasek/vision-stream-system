@@ -111,6 +111,39 @@ services:
       retries: 5
       start_period: 30s # YOLOv8 model download can take a while on first run
 
+  # ── vprocfast (Go-only MVP processor) ─────────────────────────────────────
+  vprocfast:
+    profiles: ["fast"]
+    build:
+      context: ./vprocfast
+      dockerfile: Dockerfile
+    container_name: vprocfast
+    restart: unless-stopped
+    networks:
+      - vss-net
+    ports:
+      - "8001:8001"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8001
+      - OUTPUT_DIR=/app/output
+      - FPS=${VPROCFAST_FPS:-10}
+      - SOURCE_MODE=${VPROCFAST_SOURCE_MODE:-synthetic}
+      - RTSP_URL=${VPROCFAST_RTSP_URL:-rtsp://vstreamer:8554/live}
+      - RTSP_TRANSPORT=${VPROCFAST_RTSP_TRANSPORT:-tcp}
+      - FFMPEG_PATH=${VPROCFAST_FFMPEG_PATH:-ffmpeg}
+      - JPEG_QUALITY=${VPROCFAST_JPEG_QUALITY:-80}
+      - ENABLE_DETECTION=${VPROCFAST_ENABLE_DETECTION:-true}
+      - CONFIDENCE_THRESHOLD=${VPROCFAST_CONFIDENCE_THRESHOLD:-0.5}
+    volumes:
+      - output-data:/app/output
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   # ── vdashboard ───────────────────────────────────────────────────────────────
   vdashboard:
     build:

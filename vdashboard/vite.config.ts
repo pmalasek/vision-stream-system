@@ -7,22 +7,43 @@
  * běží na portu 5173 a backend (vprocessor) na portu 8000.
  */
 
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
-export default defineConfig({
-  plugins: [
-    /**
-     * Oficiální Vite plugin pro React.
-     * Zajišťuje dvě klíčové funkce:
-     *   1. Fast Refresh (HMR) – změny v komponentách se projeví okamžitě
-     *      bez plného reloadu stránky a bez ztráty stavu aplikace.
-     *   2. Automatický JSX transform – není třeba importovat React v každém
-     *      souboru; Babel/esbuild transformaci zajistí plugin sám.
-     */
-    react(),
-  ],
-  server: {
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
+  const processorTarget =
+    env.VITE_PROCESSOR_URL && env.VITE_PROCESSOR_URL.trim() !== ""
+      ? env.VITE_PROCESSOR_URL
+      : "http://localhost:8000";
+
+  return {
+    // Kompatibilita pro starší balíčky (socket.io-client 1.x), které v browser buildu
+    // očekávají proměnnou `global` (Node.js). Ve Vite ji mapujeme na `globalThis`.
+    define: {
+      global: "globalThis",
+    },
+
+    optimizeDeps: {
+      esbuildOptions: {
+        define: {
+          global: "globalThis",
+        },
+      },
+    },
+
+    plugins: [
+      /**
+       * Oficiální Vite plugin pro React.
+       * Zajišťuje dvě klíčové funkce:
+       *   1. Fast Refresh (HMR) – změny v komponentách se projeví okamžitě
+       *      bez plného reloadu stránky a bez ztráty stavu aplikace.
+       *   2. Automatický JSX transform – není třeba importovat React v každém
+       *      souboru; Babel/esbuild transformaci zajistí plugin sám.
+       */
+      react(),
+    ],
+    server: {
     /**
      * Port vývojového serveru.
      * Hodnota 5173 je výchozí pro Vite; explicitně ji uvádíme, aby byl
@@ -47,7 +68,7 @@ export default defineConfig({
      *   backend pod stejnou doménou a portem, takže proxy pravidla jsou
      *   definována přímo v nginx.conf.
      */
-    proxy: {
+      proxy: {
       /**
        * Proxy pro MJPEG video stream.
        *
@@ -61,10 +82,10 @@ export default defineConfig({
        * aby proxy nezaváděla zbytečný buffering (Vite to v dev režimu řeší
        * transparentně; v produkci to explicitně vypínáme v nginx.conf).
        */
-      "/stream": "http://localhost:8000",
+        "/stream": processorTarget,
 
-      // Proxy pro HLS playlist + segmenty
-      "/hls": "http://localhost:8000",
+        // Proxy pro HLS playlist + segmenty
+        "/hls": processorTarget,
 
       /**
        * Proxy pro Socket.IO (real-time stavové události).
@@ -79,11 +100,11 @@ export default defineConfig({
        * hodnotu cílového serveru (localhost:8000). Bez tohoto nastavení by
        * vprocessor mohl požadavek odmítnout, protože by viděl Host: localhost:5173.
        */
-      "/socket.io": {
-        target: "http://localhost:8000",
-        ws: true, // povolí WebSocket upgrade (nutné pro Socket.IO transport)
-        changeOrigin: true, // přepíše hlavičku Host na cílový server
-      },
+        "/socket.io": {
+          target: processorTarget,
+          ws: true, // povolí WebSocket upgrade (nutné pro Socket.IO transport)
+          changeOrigin: true, // přepíše hlavičku Host na cílový server
+        },
 
       /**
        * Proxy pro REST API endpointy vprocessoru.
@@ -95,16 +116,17 @@ export default defineConfig({
        * Na rozdíl od /stream zde není potřeba speciální nastavení pro
        * streaming – jde o standardní krátkodobé JSON požadavky/odpovědi.
        */
-      "/api": {
-        target: "http://localhost:8000",
-        changeOrigin: true, // přepíše hlavičku Host na cílový server
-      },
+        "/api": {
+          target: processorTarget,
+          changeOrigin: true, // přepíše hlavičku Host na cílový server
+        },
 
       // WebRTC signaling (SDP offer/answer)
-      "/webrtc": {
-        target: "http://localhost:8000",
-        changeOrigin: true,
+        "/webrtc": {
+          target: processorTarget,
+          changeOrigin: true,
+        },
       },
     },
-  },
+  };
 });

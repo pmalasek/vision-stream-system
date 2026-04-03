@@ -14,8 +14,10 @@
  */
 
 import { useEffect, useState } from "react";
-import { io, Socket } from "socket.io-client";
+import io from "socket.io-client";
 import type { DetectionEvent, StatsEvent } from "../types";
+
+type Socket = SocketIOClient.Socket;
 
 // ---------------------------------------------------------------------------
 // Návratový typ hooku
@@ -113,10 +115,9 @@ function getSocket(): Socket {
     // Musí odpovídat hodnotě nastavené v `server.py` (výchozí je "/socket.io").
     path: "/socket.io",
 
-    // Pořadí preferovaných transportních protokolů.
-    // Socket.IO zkusí nejprve nativní WebSocket (nejnižší latence, full-duplex).
-    // Pokud WebSocket selže (proxy, firewall), automaticky přepne na long-polling.
-    transports: ["websocket", "polling"],
+    // Pořadí transportů je důležité kvůli kompatibilitě s Engine.IO v3
+    // (go-socket.io). Začínáme polling handshakem a následně upgradujeme na WS.
+    transports: ["polling", "websocket"],
 
     // Povolit automatické znovupřipojení po výpadku spojení.
     reconnection: true,
@@ -137,6 +138,7 @@ function getSocket(): Socket {
     // Timeout (v ms) pro navázání počátečního spojení.
     // Pokud server do 10 s nepotvrdí handshake, socket vyvolá "connect_error".
     timeout: 10_000,
+
   });
 
   return _socket;

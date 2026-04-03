@@ -217,6 +217,9 @@ vdashboard/.vite/
 vstreamer/vstreamer
 vstreamer/vstreamer.exe
 vstreamer/vendor/
+vprocfast/vprocfast
+vprocfast/vprocfast.exe
+vprocfast/output/
 
 # ── Video / media files ───────────────────────────────────────────
 video/

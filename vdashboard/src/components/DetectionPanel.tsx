@@ -196,6 +196,9 @@ export default function DetectionPanel({ detection }: Props) {
     ? formatTimestamp(detection.timestamp)
     : null;
 
+  // Ochrana proti backend payloadům, kde `detections` může být null.
+  const currentDetections = detection?.detections ?? [];
+
   return (
     <div className="bg-gray-800 rounded-xl border border-gray-700 p-5 flex flex-col gap-5">
       {/* ------------------------------------------------------------------ */}
@@ -251,7 +254,7 @@ export default function DetectionPanel({ detection }: Props) {
       {/* Breakdown aktuálního snímku — bounding-boxy + confidence bary       */}
       {/* Sekce se zobrazí pouze pokud přišla detekce s alespoň jednou osobou */}
       {/* ------------------------------------------------------------------ */}
-      {detection && detection.detections.length > 0 && (
+      {detection && currentDetections.length > 0 && (
         <div className="bg-gray-700/50 rounded-lg p-3 flex flex-col gap-2">
           {/* Nadpis sekce s číslem snímku */}
           <p className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-1">
@@ -259,7 +262,7 @@ export default function DetectionPanel({ detection }: Props) {
           </p>
           {/* Scrollovatelný seznam osob — max. výška 48 (12 rem) zabraňuje přetečení */}
           <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
-            {detection.detections.map((det, idx) => (
+            {currentDetections.map((det, idx) => (
               // `key={idx}` je zde bezpečné, protože se jedná o statický seznam
               // jednoho snímku, který se celý nahrazuje při každé nové detekci.
               <div key={idx} className="flex flex-col gap-0.5">
