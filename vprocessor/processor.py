@@ -571,38 +571,20 @@ class VideoProcessor:
                 timestamp = time.time()
 
                 # ── Detekce osob (volitelně pouze každý N-tý snímek) ───────
-                # detector.detect() vrátí anotovaný snímek (s nakreslenými boxy)
-                # a seznam detekovaných objektů jako slovníky.
+                # detector.detect() se volá jen na každém N-tém snímku.
+                # U mezilehlých snímků posíláme do UI čistý obraz bez boxů.
                 detect_start_perf = time.perf_counter()
                 do_detect = ((self.frame_count - 1) % detect_every_n) == 0
                 if do_detect:
                     annotated_frame, detections = self.detector.detect(frame)
-                    # Uložení detekcí pro další snímky i HTTP endpoint.
+                    # Uložení detekcí pro HTTP endpoint /api/detections.
                     self.latest_detections = detections
+                    # Průběžné sčítání celkového počtu detekcí od spuštění.
+                    self.total_detections += len(detections)
                 else:
-                    detections = list(self.latest_detections)
-                    annotated_frame = frame.copy()
-                    # Levné dokreslení posledních detekcí mezi inferenčními snímky.
-                    for det in detections:
-                        x1 = int(det.get("x1", 0))
-                        y1 = int(det.get("y1", 0))
-                        x2 = int(det.get("x2", 0))
-                        y2 = int(det.get("y2", 0))
-                        conf = float(det.get("confidence", 0.0))
-                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(
-                            annotated_frame,
-                            f"Person {conf * 100:.1f}%",
-                            (x1, max(0, y1 - 10)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.55,
-                            (0, 255, 0),
-                            1,
-                            cv2.LINE_AA,
-                        )
+                    detections = []
+                    annotated_frame = frame
                 detect_end_perf = time.perf_counter()
-                # Průběžné sčítání celkového počtu detekcí od spuštění.
-                self.total_detections += len(detections)
 
                 # ── Kódování do JPEG a uložení ─────────────────────────────
                 # Anotovaný snímek zakódujeme do JPEG s nastavenou kvalitou.
@@ -629,15 +611,16 @@ class VideoProcessor:
                 write_end_perf = time.perf_counter()
 
                 # ── Odeslání Socket.IO události "detection" ────────────────
-                # Payload obsahuje ID snímku, časové razítko, počet a seznam detekcí.
-                detection_payload = {
-                    "frame_id": self.frame_count,
-                    "timestamp": timestamp,
-                    "person_count": len(detections),
-                    "detections": detections,
-                }
+                # Event emitujeme pouze tehdy, když proběhla inference.
                 emit_start_perf = time.perf_counter()
-                self._emit(self.sio.emit("detection", detection_payload))
+                if do_detect:
+                    detection_payload = {
+                        "frame_id": self.frame_count,
+                        "timestamp": timestamp,
+                        "person_count": len(detections),
+                        "detections": detections,
+                    }
+                    self._emit(self.sio.emit("detection", detection_payload))
                 emit_end_perf = time.perf_counter()
 
                 if profile_enabled:
