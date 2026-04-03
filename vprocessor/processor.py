@@ -64,10 +64,17 @@ JPEG_QUALITY = 85  # kvalita JPEG kódování (0–100)
 
 # Potlačení vlastních C-úrovňových WARNING zpráv OpenCV (např. "backend is generally
 # available but can't be used to capture by name"), které obcházejí Python logging.
-# Používáme přímo integer 2 (= ERROR v OpenCV LogLevel enum), protože konstanty
-# cv2.LOG_LEVEL_* nejsou dostupné ve všech sestavách/verzích OpenCV.
+# Některé buildy opencv-python-headless ale API setLogLevel neposkytují, proto je
+# konfigurace podmíněná a s fallbackem na cv2.utils.logging.
 # Úrovně: 0=SILENT  1=FATAL  2=ERROR  3=WARNING  4=INFO  5=DEBUG
-cv2.setLogLevel(2)
+try:
+    if hasattr(cv2, "setLogLevel"):
+        cv2.setLogLevel(2)
+    elif hasattr(cv2, "utils") and hasattr(cv2.utils, "logging"):
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+except Exception:
+    # Log-level nastavení je best-effort; nesmí shodit import celého modulu.
+    pass
 
 
 @contextlib.contextmanager
