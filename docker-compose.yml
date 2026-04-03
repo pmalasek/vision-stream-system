@@ -3,7 +3,6 @@
 #
 #  Usage:
 #    1. Place your video file in ./video/result.mp4
-#       (or override VIDEO_FILE env var)
 #    2. docker compose up --build
 #
 #  Ports exposed on the host:
@@ -36,11 +35,9 @@ services:
     volumes:
       # Mount local ./video directory as read-only; put your video file here
       - ./video:/video:ro
-    environment:
-      - VIDEO_FILE=${VIDEO_FILE:-/video/result.mp4}
     command:
       - "--video"
-      - "${VIDEO_FILE:-/video/result.mp4}"
+      - "/video/result.mp4"
       - "--port"
       - "8554"
       - "--udp-rtp"
