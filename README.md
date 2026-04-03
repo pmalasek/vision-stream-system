@@ -2,6 +2,39 @@
 
 Systém pro real-time zpracování videa, který detekuje osoby ve video streamu, vykresluje kolem nich rámečky a zobrazuje výsledky v živém webovém dashboardu.
 
+## Ukázky
+
+<table>
+<tr>
+  <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-26-10.png" alt="Detekce 2 osob v exteriéru"></td>
+  <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-26-33.png" alt="Detekce osoby v dílně – pohled z bezpečnostní kamery shora"></td>
+</tr>
+<tr>
+  <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-26-41.png" alt="Detekce osoby v dílně – pohled z bezpečnostní kamery shora"></td>
+  <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-34-11.png" alt="Detekce 13 osob na rušné ulici (Bond Street)"></td>
+</tr>
+<tr>
+  <td colspan="2" align="center"><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-35-01.png" alt="Detekce 8 osob na ulici" width="50%"></td>
+</tr>
+</table>
+
+---
+
+## Navržené řešení
+
+Rozdělil jsem si zadání do tří modulů : 
+1. vStreamer - Emulátor IP kamery, převede video na H264 stream a zpřístupní přes RTSP
+2. vProcessor - Python/FastAPI/YOLOv8 zpracovatelský a SocketIO server - přes RTSP přijímá video stream, přes YOLOv8 jej zpracuje, metadata a video ukládá do output/<YYYY-MM-DD_hh_mm_ss>/ a současně streamuje video přes MJPEG a metadata přes SocketIO na UI.
+3. vDashboard - React/Typescript/Tailwind UI - jen zobrazuje video a metadata. 
+
+**Kdybych bych navrhoval reálný systém, postupoval bych trochu jinak**:
+
+- Pokud by zpracování probíhalo na serverech (Cloudu), aby by byla možnost škálovat počet vWorkerů v rámci infrastruktury, rozdělil bych vProcessor na :
+  - **vServer** - asi bych použil C++ nebo Go - pouze přijímá streamy z vStreamerů (kamer) a předává je ke zpracování vWorkerům, a schraňuje výsledná metadata.
+  - **vWorker** - Python/YOLOv8 - samostatný "zpracovávač", který se stará o ukládání a předává zpracovaný stream přímo na vDashboard a metadata pak vServeru, který je přes SocketIO doručí na vDashboard
+- Pokud by zpracování probíhalo v embedded zařízení, poohlédl bych se po nějakém SoC optimalizovaném pro zpracování obrazu, např. MCM-iMX95 (https://www.compulab.com/products/computer-on-modules/mcm-imx95-nxp-i-mx-95-som-smd-system-on-module/#specs) a podle počtu video vstupů bych se nebál jich spojit do virtuálního embedded serveru, kde každý SoC bude zpracovávat jen několik video streamů.
+
+
 ## Architektura
 
 ```
@@ -24,8 +57,8 @@ Systém pro real-time zpracování videa, který detekuje osoby ve video streamu
                                       MJPEG + Socket.IO
                                                   │
                                    ┌──────────────▼────────────────┐
-                                   │          vdashboard            │
-                                   │     (React/TS/Tailwind)        │
+                                   │          vdashboard           │
+                                   │     (React/TS/Tailwind)       │
                                    │                               │
                                    │  Živý video stream            │
                                    │  Real-time statistiky detekcí │
@@ -63,7 +96,7 @@ cp /cesta/k/vasemu/videu.mp4 videos/input.mp4
 docker compose up --build
 ```
 
-> **Poznámka:** Při prvním spuštění se automaticky stáhne model YOLOv8n (~6 MB) do kontejneru `vprocessor`.
+> **Poznámka:** Při prvním spuštění se automaticky stáhne model YOLOv8n (~6 MB) do kontejneru `vprocessor/models`.
 
 ### 4. Otevření dashboardu
 
