@@ -107,6 +107,9 @@ services:
     build:
       context: ./vdashboard
       dockerfile: Dockerfile
+      args:
+        VITE_PROCESSOR_URL: ${VITE_PROCESSOR_URL:-}
+        VITE_STREAM_URL: ${VITE_STREAM_URL:-http://172.24.0.40:8000/stream}
     container_name: vdashboard
     restart: unless-stopped
     networks:

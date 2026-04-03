@@ -39,10 +39,13 @@ Vývojový server automaticky přesměrovává tyto cesty na `vprocessor`:
 | Proměnná | Výchozí | Popis |
 |----------|---------|-------|
 | `VITE_PROCESSOR_URL` | `http://localhost:8000` | URL služby `vprocessor` |
+| `VITE_STREAM_URL` | `${VITE_PROCESSOR_URL}/stream` | Volitelná přímá URL MJPEG streamu; umožní obejít dashboard nginx proxy |
 
 Proměnné lze nastavit v souboru `.env.local` v adresáři `vdashboard/`.
 
 > Ve vývoji zajišťuje směrování Vite proxy, `VITE_PROCESSOR_URL` je potřeba pouze při přímém připojení na vzdálený server (např. staging) bez použití proxy.
+>
+> Pokud je MJPEG `/stream` přes dashboard nginx trhaný, ale přímý `vprocessor:8000/stream` je plynulý, nastavte `VITE_STREAM_URL` přímo na backend stream, např. `http://server:8000/stream`.
 
 ## Produkční sestavení
 

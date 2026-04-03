@@ -45,13 +45,22 @@ const PROCESSOR_BASE =
   window.location.origin;
 
 /**
+ * Volitelná přímá URL adresa MJPEG streamu.
+ *
+ * Pokud je nastavena `VITE_STREAM_URL`, použije se přímo pro `<img src>`
+ * a obejde nginx proxy ve `vdashboard`. To je výhodné v produkci, kde chceme
+ * stream vést jinou cestou než zbytek dashboard provozu (Socket.IO, API).
+ */
+const DIRECT_STREAM_URL = import.meta.env.VITE_STREAM_URL as string | undefined;
+
+/**
  * Plná URL adresa MJPEG video streamu.
  *
  * Sestavuje se připojením cesty `/stream` k základní URL procesoru.
  * Tato adresa se předává komponentě `VideoStream` jako atribut `src`
  * pro tag `<img>`, který MJPEG stream přehrává nativně v prohlížeči.
  */
-const STREAM_URL = `${PROCESSOR_BASE}/stream`;
+const STREAM_URL = DIRECT_STREAM_URL ?? `${PROCESSOR_BASE}/stream`;
 
 /**
  * Kořenová komponenta aplikace vdashboard.
