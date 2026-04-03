@@ -10,11 +10,8 @@ Systém pro real-time zpracování videa, který detekuje osoby ve video streamu
   <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-26-33.png" alt="Detekce osoby v dílně – pohled z bezpečnostní kamery shora"></td>
 </tr>
 <tr>
-  <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-26-41.png" alt="Detekce osoby v dílně – pohled z bezpečnostní kamery shora"></td>
+  <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-35-01.png" alt="Detekce 8 osob na ulici"></td>
   <td><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-34-11.png" alt="Detekce 13 osob na rušné ulici (Bond Street)"></td>
-</tr>
-<tr>
-  <td colspan="2" align="center"><img src="img/Sn%C3%ADmek%20obrazovky%20z%202026-04-03%2013-35-01.png" alt="Detekce 8 osob na ulici" width="50%"></td>
 </tr>
 </table>
 
