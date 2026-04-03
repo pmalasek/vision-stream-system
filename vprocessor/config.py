@@ -92,6 +92,10 @@ class Config:
     # 0.5 = 50 % původního rozlišení; menší hodnota = rychlejší inference.
     INFERENCE_SCALE: float = float(os.getenv("INFERENCE_SCALE", "0.5"))
 
+    # Cílová velikost vstupu pro YOLO inferenci (např. 640/512/416/320).
+    # Menší hodnota obvykle zrychlí detekci za cenu nižší přesnosti.
+    YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
+
     # Jak často flushovat JSONL metadata na disk (po kolika snímcích).
     # 1 = flush každého snímku (nejbezpečnější, ale pomalejší).
     METADATA_FLUSH_EVERY: int = int(os.getenv("METADATA_FLUSH_EVERY", "1"))

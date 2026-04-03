@@ -63,7 +63,13 @@ class PersonDetector:
       - vrácení strukturovaných metadat všech detekovaných osob.
     """
 
-    def __init__(self, model_path: str, confidence: float, inference_scale: float = 1.0) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        confidence: float,
+        inference_scale: float = 1.0,
+        imgsz: int = 640,
+    ) -> None:
         """Načte model YOLOv8 ze souboru vah a připraví detektor.
 
         Args:
@@ -77,17 +83,22 @@ class PersonDetector:
                         na 50% rozlišení, což výrazně zrychluje inferenci.
                         Výsledné detekce jsou automaticky škálovány zpět
                         na původní rozměry snímku.
+            imgsz: Cílová velikost vstupu pro YOLO inferenci.
+                        Menší hodnota (např. 416) bývá rychlejší než 640.
         """
         # Uložení prahu spolehlivosti pro pozdější použití při inferenci.
         self.confidence = confidence
         # Uložení škálovacího faktoru pro zmenšení snímku.
         self.inference_scale = inference_scale
+        # Velikost vstupu YOLO inferenčního tensoru.
+        self.imgsz = imgsz
 
         logger.info(
-            "Načítám model YOLO ze souboru '%s' (confidence=%.2f, inference_scale=%.2f) …",
+            "Načítám model YOLO ze souboru '%s' (confidence=%.2f, inference_scale=%.2f, imgsz=%d) …",
             model_path,
             confidence,
             inference_scale,
+            imgsz,
         )
 
         # ---------------------------------------------------------------
@@ -206,6 +217,7 @@ class PersonDetector:
             inference_frame,
             conf=self.confidence,
             classes=[PERSON_CLASS_ID],
+            imgsz=self.imgsz,
             verbose=False,
         )
 

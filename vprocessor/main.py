@@ -128,6 +128,7 @@ async def lifespan(app: FastAPI):
         model_path=config.YOLO_MODEL,
         confidence=config.CONFIDENCE_THRESHOLD,
         inference_scale=config.INFERENCE_SCALE,
+        imgsz=config.YOLO_IMGSZ,
     )
 
     # --- Inicializace rekordéru videa ---

@@ -71,6 +71,7 @@ services:
       - RTSP_URL=rtsp://vstreamer:8554/live
       - OUTPUT_DIR=/app/output
       - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
+      - YOLO_IMGSZ=${YOLO_IMGSZ:-640}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.5}
       - INFERENCE_SCALE=${INFERENCE_SCALE:-0.5}
       - METADATA_FLUSH_EVERY=${METADATA_FLUSH_EVERY:-1}
