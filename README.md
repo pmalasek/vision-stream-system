@@ -20,9 +20,9 @@ Systém pro real-time zpracování videa, který detekuje osoby ve video streamu
 ## Navržené řešení
 
 Rozdělil jsem si zadání do tří modulů : 
-1. vStreamer - Emulátor IP kamery, převede video na H264 stream a zpřístupní přes RTSP
-2. vProcessor - Python/FastAPI/YOLOv8 zpracovatelský a SocketIO server - přes RTSP přijímá video stream, přes YOLOv8 jej zpracuje, metadata a video ukládá do output/<YYYY-MM-DD_hh_mm_ss>/ a současně streamuje video přes MJPEG a metadata přes SocketIO na UI.
-3. vDashboard - React/Typescript/Tailwind UI - jen zobrazuje video a metadata. 
+1. **vStreamer** - Emulátor IP kamery, převede video na H264 stream a zpřístupní přes RTSP
+2. **vProcessor** - Python/FastAPI/YOLOv8 zpracovatelský a SocketIO server - přes RTSP přijímá video stream, přes YOLOv8 jej zpracuje, metadata a video ukládá do output/<YYYY-MM-DD_hh_mm_ss>/ a současně streamuje video přes MJPEG a metadata přes SocketIO na UI.
+3. **vDashboard** - React/Typescript/Tailwind UI - jen zobrazuje video a metadata. 
 
 **Kdybych bych navrhoval reálný systém, postupoval bych trochu jinak**:
 
@@ -31,6 +31,9 @@ Rozdělil jsem si zadání do tří modulů :
   - **vWorker** - Python/YOLOv8 - samostatný "zpracovávač", který se stará o ukládání a předává zpracovaný stream přímo na vDashboard a metadata pak vServeru, který je přes SocketIO doručí na vDashboard
 - Pokud by zpracování probíhalo v embedded zařízení, poohlédl bych se po nějakém SoC optimalizovaném pro zpracování obrazu, např. MCM-iMX95 (https://www.compulab.com/products/computer-on-modules/mcm-imx95-nxp-i-mx-95-som-smd-system-on-module/#specs) a podle počtu video vstupů bych se nebál jich spojit do virtuálního embedded serveru, kde každý SoC bude zpracovávat jen několik video streamů.
 
+<p align="center">
+  <em>--- Testováno na Lenovo Yoga Slim 7 14APU8 s nainstalovaným Ubuntu 25.10 ---</em>
+</p>
 
 ## Architektura
 

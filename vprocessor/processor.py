@@ -1,3 +1,38 @@
+"""
+Modul processor.py – jádro zpracovatelské pipeline pro video stream.
+
+Architektura dvou vláken (Grabber + Processing thread)
+======================================================
+
+Pipeline je záměrně rozdělena do dvou samostatných pracovních vláken, aby
+latence YOLO inference (~100 ms) nemohla vyhladovět vyčítání síťového bufferu
+RTSP streamu (~33 ms/snímek):
+
+1. **Frame grabber** (``_grabber_executor``)
+   - Spouští metodu :meth:`VideoProcessor._sync_frame_grabber`.
+   - Vlastní veškerou logiku RTSP připojení a opětovného připojování.
+   - V těsné smyčce volá ``cap.read()``, čímž průběžně vyprazdňuje dekodérský
+     buffer FFmpeg.
+   - Každý úspěšně dekódovaný snímek uloží do ``_latest_raw_frame`` a nastaví
+     ``_raw_frame_event``, čímž probudí zpracovatelské vlákno.
+
+2. **Processing thread** (``_executor``)
+   - Spouští metodu :meth:`VideoProcessor._sync_processing_loop`.
+   - Čeká na ``_raw_frame_event``, převezme poslední surový snímek,
+     spustí YOLO inferenci, zakóduje výsledek do JPEG, zapíše na disk
+     a odešle události přes Socket.IO.
+
+Obě vlákna běží uvnitř instancí ``ThreadPoolExecutor``, takže nikdy
+neblokují asyncio event loop. Hlavní event loop je zachycen v metodě
+:meth:`VideoProcessor.start` a uložen jako ``_main_loop``, aby bylo možné
+z pracovních vláken plánovat Socket.IO coroutiny pomocí
+``asyncio.run_coroutine_threadsafe``.
+
+Kontrakt ukončení (Shutdown contract)
+--------------------------------------
+Viz docstring metody :meth:`VideoProcessor.stop`.
+"""
+
 import asyncio
 import contextlib
 import logging
@@ -12,96 +47,104 @@ from config import Config
 from detector import PersonDetector
 from recorder import VideoRecorder
 
+# Standardní Python logger pojmenovaný podle modulu (hierarchické logování).
 logger = logging.getLogger(__name__)
 
-RTSP_RETRY_DELAY = 2.0  # seconds between reconnect attempts
-RTSP_READ_TIMEOUT_MS = 2_000  # ms – max time a single cap.read() may block
-JPEG_QUALITY = 85  # cv2 JPEG encode quality (0-100)
+# Prodleva v sekundách mezi jednotlivými pokusy o znovupřipojení k RTSP streamu.
+RTSP_RETRY_DELAY = 2.0  # sekundy mezi pokusy o reconnect
 
-# Suppress OpenCV's own C-level WARN messages (e.g. "backend is generally
-# available but can't be used to capture by name") that bypass Python logging.
-# Use integer 2 directly (= ERROR in OpenCV's LogLevel enum) because the
-# cv2.LOG_LEVEL_* constants are not exposed in all OpenCV builds/versions.
-cv2.setLogLevel(2)  # 0=SILENT 1=FATAL 2=ERROR 3=WARNING 4=INFO 5=DEBUG
+# Maximální doba v milisekundách, po kterou smí jedno volání cap.read() blokovat.
+# Slouží jako pojistka pro případ, že externí uvolnění z metody stop() nestihne
+# přerušit volání cap.read() dostatečně rychle.
+RTSP_READ_TIMEOUT_MS = 2_000  # ms – max. čas blokování jednoho cap.read()
+
+# Kvalita JPEG komprese při kódování snímků (rozsah 0–100, vyšší = lepší kvalita).
+# Hodnota 85 je dobrý kompromis mezi velikostí souboru a vizuální kvalitou.
+JPEG_QUALITY = 85  # kvalita JPEG kódování (0–100)
+
+# Potlačení vlastních C-úrovňových WARNING zpráv OpenCV (např. "backend is generally
+# available but can't be used to capture by name"), které obcházejí Python logging.
+# Používáme přímo integer 2 (= ERROR v OpenCV LogLevel enum), protože konstanty
+# cv2.LOG_LEVEL_* nejsou dostupné ve všech sestavách/verzích OpenCV.
+# Úrovně: 0=SILENT  1=FATAL  2=ERROR  3=WARNING  4=INFO  5=DEBUG
+cv2.setLogLevel(2)
 
 
 @contextlib.contextmanager
 def _suppress_c_stderr():
-    """Redirect raw file-descriptor 2 to /dev/null for the duration of the block.
+    """Kontextový manažer: přesměruje souborový deskriptor 2 do /dev/null.
 
-    FFmpeg (and other C extensions) write connection-error diagnostics directly
-    to fd 2, completely bypassing Python's ``sys.stderr`` and the ``logging``
-    module.  The only reliable way to silence them is to temporarily point fd 2
-    at ``/dev/null`` at the OS level.
+    Proč je to potřeba
+    ------------------
+    FFmpeg (a další C rozšíření) zapisují chybová hlášení o připojení přímo
+    na fd 2 (stderr na úrovni OS), zcela obcházejíc ``sys.stderr`` i modul
+    ``logging``. Jediný spolehlivý způsob, jak je umlčet, je dočasně
+    nasměrovat fd 2 na ``/dev/null`` přímo na úrovni OS pomocí ``os.dup2``.
 
-    The original fd is saved with ``os.dup`` and restored unconditionally in
-    the ``finally`` clause, so the context is always safe to use even if the
-    wrapped code raises.
+    Jak to funguje
+    --------------
+    - Původní fd 2 se uloží pomocí ``os.dup`` pod novým číslem deskriptoru
+      (``saved_fd``).
+    - ``os.dup2`` přesměruje fd 2 na ``/dev/null``.
+    - Po skončení bloku (nebo při výjimce) ``finally`` část vždy obnoví
+      původní fd 2 a zavře pomocné deskriptory, takže kontext je bezpečný
+      i při výjimce.
 
-    Usage::
+    Příklad použití::
 
         with _suppress_c_stderr():
             cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     """
+    # Záloha původního stderr deskriptoru pod novým číslem.
     saved_fd = os.dup(2)
+    # Otevření /dev/null pro zápis – sem budou přesměrována C-level chybová hlášení.
     devnull = os.open(os.devnull, os.O_WRONLY)
     try:
+        # Přesměrování fd 2 → /dev/null (C-level výstupy se "pohltí").
         os.dup2(devnull, 2)
         yield
     finally:
+        # Bezpodmínečné obnovení původního stderr, aby aplikace fungovala dál.
         os.dup2(saved_fd, 2)
+        # Uvolnění pomocných deskriptorů, aby nedošlo k úniku (fd leak).
         os.close(saved_fd)
         os.close(devnull)
 
 
 class VideoProcessor:
-    """Drives the capture → detect → annotate → record → broadcast pipeline.
+    """Řídí pipeline: zachycení → detekce → anotace → záznam → vysílání.
 
-    Two-thread design
+    Dvou-vláknová architektura
+    --------------------------
+    Pipeline je rozdělena do dvou dedikovaných pracovních vláken, aby latence
+    YOLO inference (~100 ms) nemohla vyhladovět vyčítání RTSP síťového bufferu
+    (~33 ms/snímek):
+
+    * **Frame grabber** (``_grabber_executor``) — spouští
+      :meth:`_sync_frame_grabber`, který vlastní veškerou logiku RTSP
+      připojení/odpojení a volá ``cap.read()`` v těsné smyčce.
+      Každý úspěšně dekódovaný snímek zapíše do ``_latest_raw_frame``
+      a nastaví ``_raw_frame_event``, aby jej zpracovatelské vlákno mohlo
+      vyzvednout.
+
+    * **Processing thread** (``_executor``) — spouští
+      :meth:`_sync_processing_loop`, který čeká na ``_raw_frame_event``,
+      vezme poslední surový snímek, spustí YOLO inferenci, zakóduje výsledek
+      do JPEG, zapíše na disk a odešle Socket.IO události.
+
+    Obě vlákna běží uvnitř ``ThreadPoolExecutor`` instancí, takže nikdy
+    neblokují asyncio event loop. Hlavní event loop je zachycen v metodě
+    :meth:`start` a uložen jako ``_main_loop``, aby bylo možné z pracovních
+    vláken plánovat Socket.IO coroutiny pomocí
+    ``asyncio.run_coroutine_threadsafe``.
+
+    Kontrakt ukončení
     -----------------
-    The pipeline is split across two dedicated worker threads to prevent YOLO
-    inference latency (~100 ms) from starving the RTSP network buffer drain
-    (~33 ms/frame):
+    Viz docstring metody :meth:`stop`.
 
-    * **Frame grabber** (``_grabber_executor``) — runs
-      :meth:`_sync_frame_grabber`, which owns all RTSP
-      connection/reconnection logic and calls ``cap.read()`` in a tight loop.
-      Each successfully decoded frame is written to ``_latest_raw_frame`` and
-      ``_raw_frame_event`` is set so the processing thread can pick it up.
-
-    * **Processing thread** (``_executor``) — runs
-      :meth:`_sync_processing_loop`, which waits on ``_raw_frame_event``,
-      takes the latest raw frame, runs YOLO inference, encodes the result to
-      JPEG, writes to disk, and emits Socket.IO events.
-
-    Both threads run inside ``ThreadPoolExecutor`` instances so they never
-    block the asyncio event loop.  The main event loop is captured in
-    :meth:`start` and stored as ``_main_loop`` so that Socket.IO coroutines
-    can be scheduled onto it via ``asyncio.run_coroutine_threadsafe``.
-
-    Shutdown contract
-    -----------------
-    Calling :meth:`stop` does the following so both worker threads exit as
-    quickly as possible:
-
-    1. Sets ``self.running = False`` — the loop condition in both threads
-       checks this flag.
-    2. Sets ``self._stop_event`` — any ``_stop_event.wait(timeout)`` call
-       (used instead of ``time.sleep`` in the grabber) returns *immediately*
-       rather than sleeping the full retry delay.
-    3. Sets ``self._raw_frame_event`` — wakes the processing thread
-       immediately if it is currently blocking inside
-       ``_raw_frame_event.wait()``, preventing it from waiting the full 0.5 s
-       timeout.
-    4. Releases ``self._cap`` under ``_cap_lock`` — this closes the network
-       socket so the blocking ``cap.read()`` call inside the FFmpeg decoder
-       returns right away with ``ret=False`` instead of waiting for the next
-       frame to arrive.  Without this step, the FFmpeg threads keep decoding
-       and printing H.264 error messages until the OS kills the process.
-
-    ``latest_frame`` is guarded by a ``threading.Lock`` because it is written
-    from the worker thread and read from async HTTP handlers running on the
-    main event loop.
+    ``latest_frame`` je chráněno ``threading.Lock``, protože je zapisováno
+    z pracovního vlákna a čteno z asynchronních HTTP handlerů běžících
+    na hlavním event loopu.
     """
 
     def __init__(
@@ -111,237 +154,302 @@ class VideoProcessor:
         recorder: VideoRecorder,
         sio,  # socketio.AsyncServer
     ) -> None:
-        self.config = config
-        self.detector = detector
-        self.recorder = recorder
-        self.sio = sio
+        # ── Závislosti injektované zvenčí ──────────────────────────────────
+        self.config = config  # konfigurace aplikace (RTSP URL, transport, …)
+        self.detector = detector  # detektor osob (obaluje YOLO model)
+        self.recorder = recorder  # zapisovač videa na disk
+        self.sio = sio  # Socket.IO AsyncServer pro real-time události
 
+        # ── Stavové příznaky ────────────────────────────────────────────────
+        # Příznak běhu – nastavení na False způsobí ukončení obou pracovních vláken.
         self.running: bool = False
+        # Celkový počet zpracovaných snímků od spuštění.
         self.frame_count: int = 0
+        # Celkový počet detekcí osob od spuštění.
         self.total_detections: int = 0
 
+        # ── Sdílený JPEG výstup ────────────────────────────────────────────
+        # Zámek chrání latest_frame před souběžným čtením/zápisem z různých vláken.
         self._frame_lock = threading.Lock()
+        # Poslední JPEG-zakódovaný snímek (bytes) nebo None, dokud žádný nepřišel.
         self.latest_frame: bytes | None = None
 
+        # ── Pomocné stavové proměnné ───────────────────────────────────────
+        # Poslední seznam detekcí (sdíleno s HTTP endpointy).
         self.latest_detections: list[dict] = []
+        # Aktuálně měřená snímková frekvence (přepočítávána každou sekundu).
         self.fps: float = 0.0
+        # Textový stav pipeline ("idle", "starting", "streaming", "reconnecting", …).
         self.status: str = "idle"
 
+        # ── Interní časovače ───────────────────────────────────────────────
+        # Čas spuštění pipeline – používá se pro výpočet doby běhu (uptime).
         self._start_time: float = 0.0
+        # Reference na hlavní asyncio event loop; zachytí se v metodě start().
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # ThreadPoolExecutor pro zpracovatelské vlákno (YOLO inference, kódování, …).
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vproc")
 
-        # ------------------------------------------------------------------
-        # Shutdown coordination
-        # ------------------------------------------------------------------
-        # _stop_event replaces bare time.sleep() in the loop so that stop()
-        # can wake the thread immediately instead of waiting up to
-        # RTSP_RETRY_DELAY seconds for the sleep to expire.
+        # ── Koordinace vypnutí (Shutdown coordination) ────────────────────
+        # _stop_event nahrazuje prosté time.sleep() ve smyčkách, takže metoda
+        # stop() může vlákna probudit okamžitě namísto čekání až
+        # RTSP_RETRY_DELAY sekund na expiraci spánku.
         self._stop_event = threading.Event()
 
-        # _cap / _cap_lock let stop() release the VideoCapture from outside
-        # the worker thread, which interrupts any blocking cap.read() call
-        # so FFmpeg stops decoding (and printing errors) right away.
+        # _cap uchovává aktuální VideoCapture; _cap_lock chrání přístup k němu,
+        # aby metoda stop() mohla deskriptor uvolnit z jiného vlákna, čímž
+        # přeruší blokující volání cap.read() a zastaví FFmpeg dekódování.
         self._cap: cv2.VideoCapture | None = None
         self._cap_lock = threading.Lock()
 
-        # ------------------------------------------------------------------
-        # Frame grabber – dedicated thread that drains the RTSP buffer
-        # continuously so YOLO inference never blocks the network read.
-        # ------------------------------------------------------------------
+        # ── Frame grabber – dedikované vlákno pro čtení RTSP bufferu ────────
+        # Samostatný ThreadPoolExecutor zabraňuje tomu, aby YOLO inference
+        # blokovala čtení ze sítě.
         self._grabber_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="grabber"
         )
 
-        # Latest raw frame shared between the grabber and the processing
-        # thread.  Guarded by _raw_frame_lock; always overwritten with the
-        # newest frame.
+        # Poslední surový snímek sdílený mezi grabberem a zpracovatelským vláknem.
+        # Chráněn _raw_frame_lock; vždy se přepíše nejnovějším snímkem (starý
+        # se zahodí, pokud jej zpracovatelské vlákno ještě nestihlo vyzvednout).
         self._latest_raw_frame: np.ndarray | None = None
         self._raw_frame_lock = threading.Lock()
 
-        # Set by the grabber whenever a new frame is stored; cleared by the
-        # processing thread after it takes the frame.  Also set by stop() to
-        # immediately unblock the processing thread.
+        # Nastavuje grabber po každém novém uloženém snímku; maže zpracovatelské
+        # vlákno po jeho vyzvednutí. Nastavuje i metoda stop(), aby okamžitě
+        # probudila zpracovatelské vlákno blokující v _raw_frame_event.wait().
         self._raw_frame_event = threading.Event()
 
-    # ------------------------------------------------------------------
-    # Public async API
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────
+    # Veřejné asynchronní API
+    # ──────────────────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Capture the running event loop and start the processing thread."""
+        """Zachytí běžící event loop a spustí obě pracovní vlákna pipeline.
+
+        Metoda nejprve inicializuje stavové proměnné, poté zachytí aktuální
+        asyncio event loop (nutné pro pozdější ``asyncio.run_coroutine_threadsafe``
+        volání z pracovních vláken) a nakonec spustí grabber i zpracovatelské
+        vlákno přes ``run_in_executor``. Čeká na dokončení obou vláken pomocí
+        ``asyncio.gather`` a loguje případné výjimky.
+        """
+        # Zabránění dvojitému spuštění – pipeline již běží.
         if self.running:
-            logger.warning("VideoProcessor.start() called while already running.")
+            logger.warning("VideoProcessor.start() voláno, ale pipeline již běží.")
             return
 
+        # Nastavení příznaku běhu a vynulování synchronizačních událostí.
         self.running = True
         self._stop_event.clear()
         self._raw_frame_event.clear()
         self._start_time = time.time()
         self.status = "starting"
 
-        # Capture the main event loop *before* entering the executor so that
-        # the worker thread can schedule coroutines back onto it.
+        # Zachycení hlavního event loopu PŘED vstupem do executoru, aby
+        # pracovní vlákna mohla plánovat coroutiny zpět na něj.
         self._main_loop = asyncio.get_running_loop()
 
-        logger.info("Starting VideoProcessor …")
+        logger.info("Spouštění VideoProcessor …")
 
+        # Spuštění grabberu v jeho dedikovaném thread poolu.
         grabber = self._main_loop.run_in_executor(
             self._grabber_executor, self._sync_frame_grabber
         )
+        # Spuštění zpracovatelské smyčky v jejím dedikovaném thread poolu.
         processor = self._main_loop.run_in_executor(
             self._executor, self._sync_processing_loop
         )
 
-        # Await both threads.  return_exceptions=True ensures that if one
-        # raises the other is still awaited before start() returns.
+        # Čekání na obě vlákna. return_exceptions=True zajistí, že pokud jedno
+        # vlákno vyhodí výjimku, druhé je přesto vyčkáno před návratem start().
         results = await asyncio.gather(grabber, processor, return_exceptions=True)
         for r in results:
             if isinstance(r, Exception):
-                logger.error("Thread exited with exception: %s", r)
+                logger.error("Vlákno skončilo s výjimkou: %s", r)
 
     async def stop(self) -> None:
-        """Signal the processing loop to stop.
+        """Pošle signál k zastavení obou pracovních vláken pipeline.
 
-        This method only *signals* – it does **not** block waiting for the
-        worker threads to exit.  The caller (``main.py`` lifespan) is
-        responsible for waiting by monitoring ``_processor_task``.
+        Metoda pouze *signalizuje* ukončení – **nečeká** na faktické
+        doběhnutí pracovních vláken. Za čekání zodpovídá volající (lifespan
+        v ``main.py``) sledováním ``_processor_task``.
 
-        Steps
-        -----
-        1. ``self.running = False`` — loop guard in both threads.
-        2. ``_stop_event.set()`` — wakes every ``_stop_event.wait()`` call
-           (used instead of ``time.sleep``) so they return immediately.
-        3. ``_raw_frame_event.set()`` — wakes the processing thread so it
-           exits from ``_raw_frame_event.wait()`` immediately instead of
-           waiting the full 0.5 s timeout.
-        4. ``_cap.release()`` — closes the RTSP socket so a blocking
-           ``cap.read()`` returns right away with ``ret=False``.
-           Guarded by ``_cap_lock`` to avoid racing with the reconnect
-           section of the grabber thread.
-        5. Both ``executor`` and ``grabber_executor`` are shut down
-           (non-blocking).
+        Kroky ukončení
+        --------------
+        1. ``self.running = False`` — podmínka smyčky v obou vláknech.
+        2. ``_stop_event.set()`` — probudí každé volání ``_stop_event.wait()``
+           (náhrada za ``time.sleep``), aby se okamžitě vrátilo.
+        3. ``_raw_frame_event.set()`` — probudí zpracovatelské vlákno čekající
+           v ``_raw_frame_event.wait()``, aby nečekalo celých 0,5 s na timeout.
+        4. ``_cap.release()`` — zavře RTSP socket, čímž způsobí, že blokující
+           ``cap.read()`` se okamžitě vrátí s ``ret=False`` namísto čekání na
+           další snímek. Chráněno ``_cap_lock`` kvůli ochraně před race
+           condition s reconnect sekcí grabberu.
+        5. Oba executory jsou uzavřeny (neblokujícím způsobem).
         """
-        logger.info("Stopping VideoProcessor …")
+        logger.info("Zastavování VideoProcessor …")
+        # Nastavení příznaku – obě smyčky při příštím průchodu zjistí, že mají skončit.
         self.running = False
         self.status = "stopped"
 
-        # Wake any thread sleeping inside _stop_event.wait().
+        # Probuzení každého vlákna, které spí v _stop_event.wait().
         self._stop_event.set()
 
-        # Wake the processing thread so it exits from _raw_frame_event.wait()
-        # immediately instead of waiting the full 0.5 s timeout.
+        # Probuzení zpracovatelského vlákna čekajícího na nový snímek,
+        # aby nečekalo celých 0,5 s na timeout události.
         self._raw_frame_event.set()
 
-        # Release the VideoCapture so that a blocking cap.read() returns
-        # immediately with ret=False.  Guarded by a lock so we don't race
-        # with the grabber thread swapping out self._cap on reconnect.
+        # Uvolnění VideoCapture, aby se blokující cap.read() okamžitě vrátil
+        # s ret=False. Zámek zabraňuje race condition s grabberem, který může
+        # zrovna provádět reconnect a měnit self._cap.
         with self._cap_lock:
             if self._cap is not None:
                 try:
                     self._cap.release()
                 except Exception as exc:  # pragma: no cover
-                    logger.debug("Ignoring error while releasing cap on stop: %s", exc)
+                    logger.debug("Ignoruji chybu při uvolňování cap ve stop(): %s", exc)
                 self._cap = None
 
-        # Mark both executors as shut-down (non-blocking).  The worker
-        # threads will exit naturally after seeing running=False / events
-        # being set; the executor pools are freed once that happens.
+        # Neblokující uzavření obou thread poolů. Pracovní vlákna se ukončí
+        # sama po detekci running=False a nastavených událostí; pooly budou
+        # uvolněny po jejich dokončení.
         self._executor.shutdown(wait=False)
         self._grabber_executor.shutdown(wait=False)
-        logger.info("VideoProcessor stop signal sent.")
+        logger.info("Signál stop odeslán do VideoProcessor.")
 
     def get_latest_frame(self) -> bytes | None:
-        """Return the most recent JPEG-encoded frame (thread-safe)."""
+        """Vrátí nejnovější JPEG-zakódovaný snímek (thread-safe).
+
+        Přístup k ``latest_frame`` je chráněn ``_frame_lock``, protože
+        snímek je zapisován z pracovního vlákna a čten z asyncio HTTP
+        handlerů na hlavním event loopu.
+
+        Returns
+        -------
+        bytes | None
+            JPEG bajty posledního zpracovaného snímku, nebo ``None``,
+            pokud ještě žádný snímek nebyl zpracován.
+        """
         with self._frame_lock:
             return self.latest_frame
 
-    # ------------------------------------------------------------------
-    # Internal – runs in the ThreadPoolExecutor worker threads
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────
+    # Interní metody – spouštěné v pracovních vláknech ThreadPoolExecutoru
+    # ──────────────────────────────────────────────────────────────────────────
 
     def _sync_frame_grabber(self) -> None:
-        """Continuously reads raw frames from the RTSP stream.
+        """Průběžně čte surové snímky z RTSP streamu.
 
-        Runs in a dedicated thread so that ``cap.read()`` is never blocked by
-        YOLO inference.  Each acquired frame overwrites ``_latest_raw_frame``
-        and sets ``_raw_frame_event`` so the processing thread can pick it up.
+        Běží v dedikovaném vlákně, takže ``cap.read()`` není nikdy blokováno
+        YOLO inferencí. Každý získaný snímek přepíše ``_latest_raw_frame``
+        a nastaví ``_raw_frame_event``, aby jej zpracovatelské vlákno mohlo
+        vyzvednout.
+
+        Logika připojení
+        ----------------
+        - Pokud ``cap`` není otevřen, metoda se pokusí o (znovu)připojení.
+        - Před otevřením streamu nastaví proměnnou prostředí
+          ``OPENCV_FFMPEG_CAPTURE_OPTIONS`` na zvolený RTSP transport (TCP/UDP).
+        - Volání ``cv2.VideoCapture`` je obaleno ``_suppress_c_stderr``, aby
+          FFmpeg chybová hlášení neznečišťovala výstup uvicornu.
+        - Po úspěšném otevření jsou nastaveny timeouty čtení.
+        - Při neúspěchu metoda čeká ``RTSP_RETRY_DELAY`` sekund pomocí
+          ``_stop_event.wait()``, což umožňuje okamžité přerušení ze stop().
+
+        Sdílení snímků
+        --------------
+        Starý snímek je jednoduše zahozen, pokud jej zpracovatelské vlákno
+        ještě nestihlo vyzvednout – grabber vždy ukládá *nejnovější* snímek.
         """
+        # Lokální proměnná pro aktuální VideoCapture objekt.
         cap: cv2.VideoCapture | None = None
 
         try:
             while self.running:
-                # ── Connect / reconnect ────────────────────────────────
+                # ── Připojení / znovupřipojení ─────────────────────────────
                 if cap is None or not cap.isOpened():
+                    # Pokud existuje starý cap (byl otevřen, ale přestal fungovat),
+                    # odstraníme jej ze sdílené proměnné a uvolníme jeho zdroje.
                     if cap is not None:
                         with self._cap_lock:
                             self._cap = None
                         cap.release()
                         cap = None
 
-                    logger.info("Connecting to RTSP stream: %s …", self.config.RTSP_URL)
+                    logger.info(
+                        "Připojování k RTSP streamu: %s …", self.config.RTSP_URL
+                    )
                     self.status = "connecting"
 
-                    # Tell the embedded FFmpeg to use the configured transport
-                    # (TCP by default) so that UDP packet loss cannot produce
-                    # H.264 "corrupted macroblock" decoder warnings.
+                    # Nastavení FFmpeg transportního protokolu (TCP/UDP) přes
+                    # proměnnou prostředí, aby UDP ztráty paketů nezpůsobovaly
+                    # H.264 "corrupted macroblock" varování dekodéru.
                     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
                         f"rtsp_transport;{self.config.RTSP_TRANSPORT}"
                     )
-                    # Wrap in _suppress_c_stderr so that FFmpeg's low-level
-                    # "[tcp @ ...] Connection refused" messages (written
-                    # directly to fd 2) don't pollute the uvicorn log output.
+
+                    # Obalení _suppress_c_stderr potlačí nízkoúrovňová FFmpeg
+                    # hlášení jako "[tcp @ ...] Connection refused", která se
+                    # jinak zapisují přímo na fd 2 a znečišťují log uvicornu.
                     with _suppress_c_stderr():
                         new_cap = cv2.VideoCapture(self.config.RTSP_URL, cv2.CAP_FFMPEG)
 
+                    # Pokud se stream nepodařilo otevřít, čekáme a zkusíme znovu.
                     if not new_cap.isOpened():
                         logger.warning(
-                            "Cannot open RTSP stream '%s'. Retrying in %.1fs …",
+                            "Nelze otevřít RTSP stream '%s'. Opakuji za %.1f s …",
                             self.config.RTSP_URL,
                             RTSP_RETRY_DELAY,
                         )
                         new_cap.release()
-                        # Interruptible wait – stop() sets the event so this
-                        # returns True immediately instead of sleeping 2 s.
+                        # Přerušitelný spánek – stop() nastaví událost, takže
+                        # wait() vrátí True okamžitě namísto čekání 2 s.
                         if self._stop_event.wait(RTSP_RETRY_DELAY):
                             break
                         continue
 
-                    # Set a hard upper bound on how long a single cap.read()
-                    # may block.  This acts as a backstop in case the external
-                    # release from stop() doesn't interrupt the call in time.
+                    # Nastavení maximální doby blokování pro cap.read() –
+                    # pojistka pro případ, že externí release ze stop() nestihne
+                    # přerušit volání včas.
                     new_cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS)
                     try:
-                        # Available in OpenCV >= 4.6; silently skip on older
-                        # builds rather than crashing the whole pipeline.
+                        # CAP_PROP_READ_TIMEOUT_MSEC je dostupné až od OpenCV 4.6;
+                        # na starších sestaveních toto nastavení tiše přeskočíme,
+                        # aby nezhroutilo celou pipeline.
                         new_cap.set(
                             cv2.CAP_PROP_READ_TIMEOUT_MSEC, RTSP_READ_TIMEOUT_MS
                         )
                     except Exception:
                         pass
 
-                    # Publish the new cap so stop() can release it externally.
+                    # Zveřejnění nového cap do sdílené proměnné, aby jej
+                    # metoda stop() mohla externě uvolnit z jiného vlákna.
                     cap = new_cap
                     with self._cap_lock:
                         self._cap = cap
 
-                    logger.info("RTSP stream opened successfully.")
+                    logger.info("RTSP stream úspěšně otevřen.")
                     self.status = "streaming"
 
-                # Guard: bail out before starting a new read after stop().
+                # Bezpečnostní kontrola: před zahájením nového čtení ověříme,
+                # zda stop() nebyl zavolán v průběhu reconnect sekce.
                 if self._stop_event.is_set():
                     break
 
-                # ── Read a frame ───────────────────────────────────────
+                # ── Čtení snímku ───────────────────────────────────────────
+                # Toto volání může blokovat až RTSP_READ_TIMEOUT_MS milisekund.
                 ret, frame = cap.read()
 
+                # Kontrola příznaku running ihned po návratu z blokujícího read().
                 if not self.running:
                     break
 
+                # Pokud čtení selhalo (stream přerušen, síťová chyba apod.),
+                # uvolníme cap a přejdeme do stavu reconnecting.
                 if not ret or frame is None:
                     logger.warning(
-                        "Failed to read frame – stream may have dropped. "
-                        "Retrying in %.1fs …",
+                        "Nepodařilo se přečíst snímek – stream mohl být přerušen. "
+                        "Opakuji za %.1f s …",
                         RTSP_RETRY_DELAY,
                     )
                     with self._cap_lock:
@@ -349,24 +457,27 @@ class VideoProcessor:
                     cap.release()
                     cap = None
                     self.status = "reconnecting"
-                    # Interruptible sleep – exits immediately if stop() fires.
+                    # Přerušitelný spánek – okamžitě se vrátí, pokud stop() zavolá set().
                     if self._stop_event.wait(RTSP_RETRY_DELAY):
                         break
                     continue
 
-                # ── Share with processing thread ───────────────────────
-                # Always overwrite so the processor always gets the latest
-                # frame; the old frame is simply dropped if the processor
-                # hasn't consumed it yet.
+                # ── Sdílení snímku se zpracovatelským vláknem ──────────────
+                # Vždy přepíšeme _latest_raw_frame nejnovějším snímkem.
+                # Starý snímek se jednoduše zahodí, pokud jej procesor nestačil
+                # vyzvednout – vždy chceme zpracovávat co nejčerstvější obraz.
                 with self._raw_frame_lock:
                     self._latest_raw_frame = frame
+                # Probuzení zpracovatelského vlákna, aby vědělo o novém snímku.
                 self._raw_frame_event.set()
 
         except Exception as exc:
-            logger.exception("Unexpected error in frame grabber: %s", exc)
+            # Neočekávaná výjimka – zalogujeme celý traceback a přejdeme do stavu error.
+            logger.exception("Neočekávaná chyba v grabberu snímků: %s", exc)
             self.status = "error"
 
         finally:
+            # Bezpodmínečné uvolnění VideoCapture při jakémkoliv ukončení smyčky.
             if cap is not None:
                 try:
                     cap.release()
@@ -374,57 +485,84 @@ class VideoProcessor:
                     pass
                 with self._cap_lock:
                     self._cap = None
-                logger.info("VideoCapture released (grabber).")
+                logger.info("VideoCapture uvolněn (grabber).")
 
-            # Wake the processing thread so it can exit cleanly even if it
-            # is currently waiting inside _raw_frame_event.wait().
+            # Probuzení zpracovatelského vlákna, aby mohlo čistě skončit,
+            # i když právě čeká uvnitř _raw_frame_event.wait().
             self._raw_frame_event.set()
-            logger.info("Frame grabber exited (status=%s).", self.status)
+            logger.info("Frame grabber ukončen (status=%s).", self.status)
 
     def _sync_processing_loop(self) -> None:
-        """Runs YOLO inference on the latest raw frame from ``_sync_frame_grabber``.
+        """Spouští YOLO inferenci na nejnovějším surovém snímku z grabberu.
 
-        Deliberately decoupled from RTSP reading so that inference latency
-        never starves the network buffer drain in the grabber thread.
+        Záměrně odděleno od čtení RTSP, aby latence inference nikdy
+        nevyhladověla vyčítání síťového bufferu v grabber vlákně.
+
+        Průběh jedné iterace smyčky
+        ---------------------------
+        1. Čeká na ``_raw_frame_event`` (max. 0,5 s timeout pro periodické
+           ověření ``self.running``).
+        2. Vezme nejnovější surový snímek z ``_latest_raw_frame``.
+        3. Spustí detekci osob přes ``detector.detect()``.
+        4. Zakóduje anotovaný snímek do JPEG a uloží do ``latest_frame``.
+        5. Předá anotovaný snímek rekordéru pro zápis na disk.
+        6. Odešle Socket.IO událost ``detection`` s výsledky detekce.
+        7. Aktualizuje FPS čítač a jednou za sekundu odešle Socket.IO
+           událost ``stats``.
         """
+        # Lokální čítač snímků pro výpočet FPS (nezávislý na self.frame_count).
         fps_frame_count: int = 0
+        # Čas posledního resetu FPS čítače.
         fps_timer: float = time.time()
+        # Čas posledního odeslání statistik přes Socket.IO.
         last_stats_time: float = time.time()
 
         try:
             while self.running:
-                # ── Wait for a new raw frame ───────────────────────────
-                # Timeout of 0.5 s lets us re-check self.running periodically
-                # even when no frames arrive (e.g. stream not yet connected).
+                # ── Čekání na nový surový snímek ───────────────────────────
+                # Timeout 0,5 s umožňuje periodické ověřování self.running,
+                # i když žádné snímky nepřicházejí (např. stream ještě není připojen).
                 if not self._raw_frame_event.wait(timeout=0.5):
+                    # Timeout vypršel bez nového snímku – opakujeme čekání.
                     continue
+                # Vynulování události, abychom čekali na skutečně nový snímek.
                 self._raw_frame_event.clear()
 
+                # Vyzvednutí nejnovějšího snímku pod zámkem.
                 with self._raw_frame_lock:
                     frame = self._latest_raw_frame
 
+                # Pokud není snímek k dispozici nebo pipeline končí, přeskočíme.
                 if frame is None or not self.running:
                     continue
 
+                # Inkrementace globálního čítače zpracovaných snímků.
                 self.frame_count += 1
                 fps_frame_count += 1
                 timestamp = time.time()
 
-                # ── Detect persons ─────────────────────────────────────
+                # ── Detekce osob ───────────────────────────────────────────
+                # detector.detect() vrátí anotovaný snímek (s nakreslenými boxy)
+                # a seznam detekovaných objektů jako slovníky.
                 annotated_frame, detections = self.detector.detect(frame)
+                # Uložení detekcí pro HTTP endpoint /api/detections.
                 self.latest_detections = detections
+                # Průběžné sčítání celkového počtu detekcí od spuštění.
                 self.total_detections += len(detections)
 
-                # ── Encode to JPEG and store ───────────────────────────
+                # ── Kódování do JPEG a uložení ─────────────────────────────
+                # Anotovaný snímek zakódujeme do JPEG s nastavenou kvalitou.
                 ok, buffer = cv2.imencode(
                     ".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
                 )
                 if ok:
                     jpeg_bytes = buffer.tobytes()
+                    # Zápis pod zámkem – latest_frame čtou HTTP handlery z jiného vlákna.
                     with self._frame_lock:
                         self.latest_frame = jpeg_bytes
 
-                # ── Write to disk ──────────────────────────────────────
+                # ── Zápis na disk ──────────────────────────────────────────
+                # Rekordér rozhodne, zda snímek zapsat (závisí na konfiguraci záznamu).
                 self.recorder.write_frame(
                     frame=annotated_frame,
                     frame_id=self.frame_count,
@@ -432,7 +570,8 @@ class VideoProcessor:
                     timestamp=timestamp,
                 )
 
-                # ── Emit Socket.IO events ──────────────────────────────
+                # ── Odeslání Socket.IO události "detection" ────────────────
+                # Payload obsahuje ID snímku, časové razítko, počet a seznam detekcí.
                 detection_payload = {
                     "frame_id": self.frame_count,
                     "timestamp": timestamp,
@@ -441,54 +580,76 @@ class VideoProcessor:
                 }
                 self._emit(self.sio.emit("detection", detection_payload))
 
-                # ── Update FPS counter ─────────────────────────────────
+                # ── Aktualizace FPS čítače ─────────────────────────────────
                 now = time.time()
                 elapsed_fps = now - fps_timer
                 if elapsed_fps >= 1.0:
+                    # Přepočet FPS jako počet snímků za uplynulou sekundu.
                     self.fps = round(fps_frame_count / elapsed_fps, 2)
+                    # Reset lokálního čítače a timeru pro další periodu.
                     fps_frame_count = 0
                     fps_timer = now
 
-                # Emit stats once per second
+                # Jednou za sekundu odeslat statistiky přes Socket.IO.
                 if now - last_stats_time >= 1.0:
                     self._emit(self.sio.emit("stats", self._build_stats_payload()))
                     last_stats_time = now
 
         except Exception as exc:
-            logger.exception("Unexpected error in processing loop: %s", exc)
+            # Neočekávaná výjimka v inferenční smyčce – zalogujeme a přejdeme do stavu error.
+            logger.exception("Neočekávaná chyba ve zpracovatelské smyčce: %s", exc)
             self.status = "error"
 
         finally:
+            # Bezpodmínečné uvolnění rekordéru při jakémkoliv ukončení smyčky.
             try:
                 self.recorder.release()
             except Exception as exc:
-                logger.error("Error releasing recorder: %s", exc)
+                logger.error("Chyba při uvolňování rekordéru: %s", exc)
 
-            logger.info("Processing loop exited.")
+            logger.info("Zpracovatelská smyčka ukončena.")
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────
+    # Pomocné metody
+    # ──────────────────────────────────────────────────────────────────────────
 
     def _emit(self, coro) -> None:
-        """Schedule a Socket.IO coroutine onto the main event loop.
+        """Naplánuje Socket.IO coroutinu na hlavní event loop.
 
-        Safe to call from any thread.  If the main loop is not yet available
-        (e.g. called before :meth:`start`) the coroutine is silently dropped.
+        Bezpečné pro volání z libovolného vlákna. Pokud hlavní event loop
+        ještě není dostupný (např. voláno před :meth:`start`) nebo je již
+        uzavřen, coroutina se tiše zahodí, aby nedocházelo k varování
+        "coroutine was never awaited".
+
+        Parameters
+        ----------
+        coro:
+            Coroutina vrácená metodou ``sio.emit(...)``; musí být ihned
+            naplánována nebo explicitně zavřena.
         """
         if self._main_loop is None or self._main_loop.is_closed():
-            # The event loop is gone – discard the coroutine explicitly so
-            # Python does not emit "coroutine was never awaited" warnings.
+            # Event loop není k dispozici – coroutinu explicitně zavřeme,
+            # abychom předešli Pythonovu varování "coroutine was never awaited".
             coro.close()
             return
+        # Bezpečné naplánování coroutiny z libovolného vlákna na hlavní event loop.
         asyncio.run_coroutine_threadsafe(coro, self._main_loop)
 
     def _build_stats_payload(self) -> dict:
+        """Sestaví slovník statistik pro Socket.IO událost ``stats``.
+
+        Returns
+        -------
+        dict
+            Slovník s klíči: ``fps``, ``total_frames``, ``total_detections``,
+            ``uptime_seconds``, ``status``.
+        """
+        # Výpočet doby běhu od spuštění pipeline; 0.0 pokud ještě neběžela.
         uptime = time.time() - self._start_time if self._start_time else 0.0
         return {
-            "fps": self.fps,
-            "total_frames": self.frame_count,
-            "total_detections": self.total_detections,
-            "uptime_seconds": round(uptime, 2),
-            "status": self.status,
+            "fps": self.fps,  # aktuální snímková frekvence
+            "total_frames": self.frame_count,  # celkový počet zpracovaných snímků
+            "total_detections": self.total_detections,  # celkový počet detekcí osob
+            "uptime_seconds": round(uptime, 2),  # doba běhu v sekundách
+            "status": self.status,  # textový stav pipeline
         }

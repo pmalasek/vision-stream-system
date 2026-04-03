@@ -1,12 +1,49 @@
+/**
+ * Komponenta VideoStream
+ *
+ * Zobrazuje živý MJPEG video stream ze serveru vprocessor a překrývá jej
+ * stavovými overlays podle aktuálního stavu procesoru a stavu HTTP spojení.
+ *
+ * Tři možné vizuální stavy video plochy:
+ *  1. „No-signal" overlay  – žádný použitelný snímek (odpojeno, chyba, načítání)
+ *  2. „Frozen-frame" overlay – poslední přijatý snímek je vidět, ale stream
+ *                              není živý (idle, starting, connecting, …)
+ *  3. Živý stream           – MJPEG pipe aktivně dodává snímky, zobrazí se LIVE badge
+ */
+
 import React, { useState } from "react";
 import type { StatsEvent } from "../types";
 
+/**
+ * Props komponenty VideoStream.
+ *
+ * @property streamUrl    – URL MJPEG endpointu (např. „/stream"); předává se
+ *                          přímo do atributu `src` elementu `<img>`.
+ * @property isConnected  – true pokud je Socket.IO spojení se serverem aktivní.
+ * @property stats        – poslední stavová zpráva přijatá přes Socket.IO,
+ *                          nebo null dokud nepřijde první událost.
+ */
 interface VideoStreamProps {
   streamUrl: string;
   isConnected: boolean;
   stats: StatsEvent | null;
 }
 
+/**
+ * Lookup tabulka stavů procesoru → vizuální metadata pro „frozen-frame" overlay.
+ *
+ * Klíče odpovídají hodnotám pole `status` ze zprávy StatsEvent, která přichází
+ * ze serveru přes Socket.IO. Pro každý stav definujeme:
+ *   - icon  – emoji zobrazená jako hlavní ikona overlaye
+ *   - title – krátký nadpis stavu
+ *   - sub   – podrobnější popis / instrukce pro uživatele
+ *   - color – Tailwind třída barvy pro text nadpisu
+ *
+ * Stav „streaming" má záměrně prázdné hodnoty: když procesor streamuje,
+ * overlay se vůbec nevykreslí (řídí to podmínka `showFrozenOverlay`), takže
+ * tyto hodnoty nejsou nikdy použity. Záznam zde existuje pouze proto, aby
+ * TypeScript uzavřel výčet a nevynucoval zvláštní větev v typech.
+ */
 const STATUS_OVERLAY: Record<
   StatsEvent["status"],
   { icon: string; title: string; sub: string; color: string }
@@ -35,6 +72,10 @@ const STATUS_OVERLAY: Record<
     sub: "Source lost — retrying…",
     color: "text-yellow-400",
   },
+  /**
+   * Stav „streaming": overlay se při tomto stavu nikdy nezobrazí,
+   * proto jsou všechny hodnoty prázdné řetězce.
+   */
   streaming: {
     icon: "",
     title: "",
@@ -55,39 +96,115 @@ const STATUS_OVERLAY: Record<
   },
 };
 
+/**
+ * VideoStream – hlavní prezentační komponenta pro MJPEG video stream.
+ *
+ * Skládá se ze dvou částí:
+ *  - Hlavička karty s názvem a connection badge
+ *  - Video plocha s `<img>` elementem a třemi možnými overlays
+ *
+ * Komponenta záměrně udržuje `<img>` element vždy namontovaný v DOM, i když
+ * stream není viditelný. Díky tomu browser udržuje HTTP long-poll spojení
+ * (MJPEG pipe) živé a první snímek se zobrazí bez prodlevy jakmile server
+ * začne odesílat data.
+ */
 const VideoStream: React.FC<VideoStreamProps> = ({
   streamUrl,
   isConnected,
   stats,
 }) => {
+  /**
+   * imgError – true pokud browser nahlásil chybu při načítání `<img>`.
+   * Typicky nastane při HTTP 4xx/5xx odpovědi serveru nebo při výpadku sítě
+   * poté, co bylo spojení navázáno. Resetuje se při úspěšném načtení.
+   */
   const [imgError, setImgError] = useState(false);
+
+  /**
+   * imgLoaded – true jakmile browser přijme a zobrazí alespoň jeden snímek
+   * (první volání `onLoad` na MJPEG streamu). Zůstane true i při přerušení
+   * streamu – browser stále drží poslední zobrazený snímek v paměti.
+   * Resetuje se při chybě, aby se znovu ukázal loading spinner po reconnectu.
+   */
   const [imgLoaded, setImgLoaded] = useState(false);
 
+  /**
+   * handleError – voláno browserem při chybě načítání `<img>`.
+   * Přepne stav do chybového režimu a zruší příznak úspěšného načtení.
+   * Výsledkem je zobrazení „no-signal" overlaye s ikonou odpojené kamery.
+   */
   const handleError = () => {
     setImgError(true);
     setImgLoaded(false);
   };
 
+  /**
+   * handleLoad – voláno browserem při každém úspěšně přijatém snímku.
+   * Na MJPEG streamu se `onLoad` spouští opakovaně s každým novým JPEG framem.
+   * Vymaže chybový stav a potvrdí, že obraz je k dispozici.
+   */
   const handleLoad = () => {
     setImgError(false);
     setImgLoaded(true);
   };
 
-  // True only when the MJPEG pipe is actually delivering live frames.
+  /**
+   * isLive – true pouze tehdy, když MJPEG pipe aktivně dodává živé snímky.
+   *
+   * Všechny čtyři podmínky musí platit současně:
+   *   isConnected          → Socket.IO je připojeno (máme stavová data)
+   *   !imgError            → browser nenahlásil chybu na <img> elementu
+   *   imgLoaded            → browser úspěšně přijal alespoň jeden snímek
+   *   stats?.status === "streaming" → procesor hlásí stav „streaming"
+   *
+   * Pokud libovolná podmínka selže, stream není považován za živý a zobrazí
+   * se buď no-signal nebo frozen-frame overlay.
+   */
   const isLive =
     isConnected && !imgError && imgLoaded && stats?.status === "streaming";
 
-  // Show the full black "no signal" overlay when we have no image at all.
+  /**
+   * showNoSignal – true když nemáme žádný použitelný snímek k zobrazení.
+   *
+   * Nastane při kterékoli z těchto situací:
+   *   !isConnected → Socket.IO odpojeno; server je nedostupný
+   *   imgError     → browser nahlásil HTTP chybu na MJPEG endpointu
+   *   !imgLoaded   → připojeno, ale browser ještě nepřijal první snímek
+   *                  (čekáme na první frame → zobrazíme loading spinner)
+   *
+   * V tomto stavu je `<img>` element neviditelný (opacity-0), aby nezabíral
+   * vizuální prostor, a celou plochu pokryje tmavý overlay.
+   */
   const showNoSignal = !isConnected || imgError || !imgLoaded;
 
-  // Show the semi-transparent "frozen" overlay when we have a frame but it's stale.
+  /**
+   * showFrozenOverlay – true když máme snímek, ale stream není živý.
+   *
+   * Jde o „mezistav": browser zobrazuje poslední přijatý JPEG frame, ale
+   * procesor nepřenáší nová data (je ve stavu idle, starting, connecting, …).
+   * `<img>` zůstane viditelný se sníženou opacitou a šedým filtrem
+   * (opacity-40 + grayscale), aby bylo jasné, že obraz je starý.
+   * Semi-transparentní overlay informuje o aktuálním stavu procesoru.
+   *
+   * Podmínka: máme snímek (není showNoSignal) ale nejsme živí (!isLive).
+   */
   const showFrozenOverlay = !showNoSignal && !isLive;
 
+  /** Zkrácený alias pro aktuální stav procesoru; null před prvním stats eventem. */
   const processorStatus = stats?.status ?? null;
 
   return (
     <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden flex flex-col h-full">
-      {/* ── Card header ───────────────────────────────────────────── */}
+      {/* ── Hlavička karty ─────────────────────────────────────────────────── */}
+      {/*
+        Obsahuje název sekce a connection badge indikující stav Socket.IO
+        spojení a dostupnost MJPEG streamu.
+        Badge má „glow shadow" efekt pomocí Tailwind arbitrary shadow:
+          zelená záře  → shadow-[0_0_6px_2px_rgba(74,222,128,0.5)]
+          červená záře → shadow-[0_0_6px_2px_rgba(239,68,68,0.45)]
+        Tečka svítí zeleně pokud je Socket.IO připojeno A <img> nemá chybu,
+        jinak červeně, aby bylo okamžitě vidět jakýkoli problém se spojením.
+      */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
         <div className="flex items-center gap-2">
           <span className="text-lg">📹</span>
@@ -96,7 +213,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({
           </h2>
         </div>
 
-        {/* Socket.IO connection badge */}
+        {/* Connection badge: barevná tečka + textový popis stavu spojení */}
         <div className="flex items-center gap-2">
           <span
             className={`inline-block w-2.5 h-2.5 rounded-full ${
@@ -115,9 +232,25 @@ const VideoStream: React.FC<VideoStreamProps> = ({
         </div>
       </div>
 
-      {/* ── Video area ────────────────────────────────────────────── */}
+      {/* ── Video plocha ───────────────────────────────────────────────────── */}
       <div className="relative flex-1 bg-gray-950 flex items-center justify-center min-h-0">
-        {/* MJPEG image — always mounted so the browser keeps the pipe alive */}
+        {/*
+          MJPEG <img> element – záměrně vždy mountován v DOM.
+
+          Důvod: Browser otevírá HTTP spojení k MJPEG endpointu okamžikem
+          namountování elementu a udržuje ho živé po celou dobu, dokud je
+          element v DOM. Kdybychom element podmíněně renderovali (pouze když
+          isConnected === true), browser by při každém připojení/odpojení
+          uzavíral a znovu otevíral TCP spojení a první frame by přišel
+          s výraznou latencí.
+
+          Tří-stavová opacity podle aktuálního vizuálního stavu:
+            opacity-0            → showNoSignal: obraz není k dispozici;
+                                   <img> je neviditelný, ale stále v DOM
+            opacity-40 grayscale → showFrozenOverlay: starý zmrzlý snímek;
+                                   zešednutý a poloprůhledný jako „ghosting"
+            opacity-100          → isLive: plně viditelný živý obraz
+        */}
         <img
           src={streamUrl}
           alt="Live MJPEG stream"
@@ -132,10 +265,30 @@ const VideoStream: React.FC<VideoStreamProps> = ({
           onError={handleError}
         />
 
-        {/* ── No-signal overlay (no image at all) ─────────────────── */}
+        {/* ── No-signal overlay (žádný použitelný snímek) ────────────────── */}
+        {/*
+          Zobrazí se přes celou video plochu, kdykoliv showNoSignal === true.
+          Má dvě vnitřní větve podle příčiny absence signálu:
+
+          VĚTEV „loading":
+            Podmínka: isConnected && !imgError
+            Situace: Socket.IO je připojeno a chyba nenastala, ale browser
+                     ještě nepřijal první MJPEG frame. Typicky trvá < 1 s.
+            UI: zelený točící se spinner + pulzující text „Loading stream…"
+
+          VĚTEV „disconnected":
+            Podmínka: !isConnected || imgError
+            Situace: Server je nedostupný nebo <img> nahlásil HTTP chybu.
+            UI:
+              - Ikona přeškrtnuté kamery (SVG s diagonální čárou)
+              - Text „Stream unavailable" + podtext
+              - Tři animované tečky s postupným `animationDelay` (0 / 150 / 300 ms),
+                které vizuálně naznačují čekání na obnovení spojení
+        */}
         {showNoSignal && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-gray-950">
             {isConnected && !imgError ? (
+              /* Větev „loading": jsme připojeni, čekáme na první snímek */
               <>
                 <svg
                   className="w-10 h-10 text-green-400 animate-spin"
@@ -162,7 +315,9 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                 </p>
               </>
             ) : (
+              /* Větev „disconnected": server nedostupný nebo chyba na <img> */
               <>
+                {/* Ikona přeškrtnuté kamery */}
                 <div className="w-16 h-16 rounded-full bg-gray-800 border border-gray-700 flex items-center justify-center">
                   <svg
                     className="w-8 h-8 text-gray-500"
@@ -177,6 +332,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                       strokeLinejoin="round"
                       d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9A2.25 2.25 0 0013.5 5.25h-9A2.25 2.25 0 002.25 7.5v9A2.25 2.25 0 004.5 18.75z"
                     />
+                    {/* Diagonální čára přes ikonu kamery – vizuální „přeškrtnutí" */}
                     <line
                       x1="3"
                       y1="3"
@@ -188,6 +344,8 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                     />
                   </svg>
                 </div>
+
+                {/* Stavový text */}
                 <div className="text-center">
                   <p className="text-gray-300 text-sm font-medium">
                     Stream unavailable
@@ -196,6 +354,12 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                     Waiting for vprocessor connection…
                   </p>
                 </div>
+
+                {/*
+                  Animované tečky naznačující čekání.
+                  Každá tečka má jiné `animationDelay` (0 / 150 / 300 ms),
+                  aby se bounceovaly za sebou jako „…" efekt.
+                */}
                 <div className="flex gap-1.5">
                   {[0, 1, 2].map((i) => (
                     <span
@@ -210,31 +374,62 @@ const VideoStream: React.FC<VideoStreamProps> = ({
           </div>
         )}
 
-        {/* ── Frozen-frame overlay (image visible but stream is paused) ── */}
+        {/* ── Frozen-frame overlay (snímek viditelný, stream pozastaven) ─── */}
+        {/*
+          Zobrazí se, když showFrozenOverlay === true, tedy:
+            - máme alespoň jeden snímek od browseru (imgLoaded)
+            - ale stream není živý (procesor není ve stavu „streaming")
+
+          Vizuální efekty overlaye:
+            bg-gray-950/60     → poloprůhledné tmavé pozadí (60 % opacity)
+            backdrop-blur-[2px] → lehké rozmazání snímku pod overlayem,
+                                  aby byl starý obraz jasně odlišen od živého
+
+          Stavová karta uprostřed zobrazuje ikonu, nadpis a popis stavu
+          procesoru vyhledaná v konstantě STATUS_OVERLAY.
+          Fallback hodnoty (??  operátor) chrání před hypotetickým null,
+          i když TypeScript výčet garantuje přítomnost záznamu.
+        */}
         {showFrozenOverlay && processorStatus && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gray-950/60 backdrop-blur-[2px]">
+            {/* Stavová karta se zaoblenými rohy a shadow efektem */}
             <div className="bg-gray-900/80 border border-gray-700 rounded-xl px-6 py-5 flex flex-col items-center gap-2 shadow-xl max-w-xs text-center">
+              {/* Velká stavová emoji ikona */}
               <span className="text-3xl leading-none">
                 {STATUS_OVERLAY[processorStatus]?.icon ?? "⏸"}
               </span>
+              {/* Nadpis stavu v barvě odpovídající závažnosti */}
               <p
                 className={`text-sm font-semibold ${STATUS_OVERLAY[processorStatus]?.color ?? "text-gray-300"}`}
               >
                 {STATUS_OVERLAY[processorStatus]?.title ?? processorStatus}
               </p>
+              {/* Popis stavu / instrukce pro uživatele */}
               <p className="text-gray-400 text-xs">
                 {STATUS_OVERLAY[processorStatus]?.sub ?? ""}
               </p>
             </div>
+            {/* Poznámka pod kartou – uživatel ví, že vidí starý snímek */}
             <p className="text-gray-500 text-xs italic">
               Showing last received frame
             </p>
           </div>
         )}
 
-        {/* ── LIVE badge — only when truly streaming ────────────────── */}
+        {/* ── LIVE badge – zobrazí se pouze při skutečně živém streamu ─────── */}
+        {/*
+          Podmínka: isLive === true
+            → Socket.IO připojeno, žádná chyba, snímek načten, status = "streaming"
+
+          UI: pill v levém horním rohu s:
+            - pulsující červenou tečkou (animate-pulse) jako broadcast indikátor
+            - textem „LIVE" s rozšířeným letter-spacingem (tracking-widest)
+          Průhledné pozadí (black/60) s backdrop-blur zajišťuje čitelnost
+          na jakémkoli pozadí videa.
+        */}
         {isLive && (
           <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-full border border-red-500/40">
+            {/* Pulsující červená tečka – klasický broadcast indikátor */}
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
             <span className="text-white text-xs font-bold tracking-widest uppercase">
               Live
@@ -242,9 +437,22 @@ const VideoStream: React.FC<VideoStreamProps> = ({
           </div>
         )}
 
-        {/* ── Non-live status pill (top-left, when image present but frozen) ── */}
+        {/* ── Non-live status pill (levý horní roh, zmrzlý snímek) ────────── */}
+        {/*
+          Podmínka: showFrozenOverlay === true && processorStatus !== null
+            → máme snímek, ale procesor neposílá živá data
+
+          Zobrazí se na stejné pozici jako LIVE badge (top-3 left-3), ale
+          nikdy nejsou zobrazeny oba zároveň – jsou podmíněny vzájemně
+          vylučujícími se hodnotami (isLive vs. showFrozenOverlay).
+
+          UI: pill se žlutou pulsující tečkou a názvem aktuálního stavu
+          procesoru (idle / starting / connecting / reconnecting / …).
+          Žlutá barva naznačuje „pozor, čekáme" bez pocitu chyby.
+        */}
         {showFrozenOverlay && processorStatus && (
           <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm px-2.5 py-1 rounded-full border border-yellow-600/50">
+            {/* Pulsující žlutá tečka – indikátor přechodného stavu */}
             <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
             <span className="text-yellow-300 text-xs font-bold tracking-widest uppercase">
               {processorStatus}
