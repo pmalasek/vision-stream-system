@@ -127,7 +127,7 @@ async def lifespan(app: FastAPI):
     detector = PersonDetector(
         model_path=config.YOLO_MODEL,
         confidence=config.CONFIDENCE_THRESHOLD,
-        inference_scale=0.5,
+        inference_scale=config.INFERENCE_SCALE,
     )
 
     # --- Inicializace rekordéru videa ---
@@ -137,6 +137,7 @@ async def lifespan(app: FastAPI):
         output_dir=config.OUTPUT_DIR,
         segment_duration_minutes=config.SEGMENT_DURATION_MINUTES,
         max_segments=config.MAX_SEGMENTS,
+        metadata_flush_every=config.METADATA_FLUSH_EVERY,
     )
 
     # --- Sestavení VideoProcessoru ---

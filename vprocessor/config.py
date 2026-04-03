@@ -88,6 +88,14 @@ class Config:
     # tuto hodnotu.
     MAX_SEGMENTS: int = int(os.getenv("MAX_SEGMENTS", "3"))
 
+    # Škálování snímku před YOLO inferencí (0.0–1.0).
+    # 0.5 = 50 % původního rozlišení; menší hodnota = rychlejší inference.
+    INFERENCE_SCALE: float = float(os.getenv("INFERENCE_SCALE", "0.5"))
+
+    # Jak často flushovat JSONL metadata na disk (po kolika snímcích).
+    # 1 = flush každého snímku (nejbezpečnější, ale pomalejší).
+    METADATA_FLUSH_EVERY: int = int(os.getenv("METADATA_FLUSH_EVERY", "1"))
+
     # Zapnutí podrobného profilování pipeline po krocích (detect/encode/write/emit).
     # Pokud je True, v logu se periodicky vypisují průměrné časy jednotlivých kroků.
     PROFILE_PIPELINE: bool = _env_bool("PROFILE_PIPELINE", False)

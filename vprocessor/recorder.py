@@ -75,6 +75,7 @@ class VideoRecorder:
         output_dir: str,
         segment_duration_minutes: int = 10,
         max_segments: int = 3,
+        metadata_flush_every: int = 1,
     ) -> None:
         """Připraví výstupní adresář pro aktuální nahrávací sezení.
 
@@ -98,6 +99,8 @@ class VideoRecorder:
         self._output_dir = output_dir
         self._segment_duration_seconds: float = segment_duration_minutes * 60
         self._max_segments = max_segments
+        self._metadata_flush_every = max(1, metadata_flush_every)
+        self._metadata_pending_writes = 0
 
         # Vygenerujeme časovou značku pro pojmenování adresáře sezení.
         # Formát je kompatibilní s názvem adresáře na všech platformách
@@ -185,7 +188,10 @@ class VideoRecorder:
         # Serializujeme záznam do JSON a zapíšeme jako jeden řádek (JSONL formát).
         # Flush zajistí okamžité zapsání na disk bez čekání na vyprázdnění bufferu.
         self._metadata_file.write(json.dumps(record) + "\n")
-        self._metadata_file.flush()
+        self._metadata_pending_writes += 1
+        if self._metadata_pending_writes >= self._metadata_flush_every:
+            self._metadata_file.flush()
+            self._metadata_pending_writes = 0
 
     def release(self) -> None:
         """Uvolní VideoWriter a zavře soubor s metadaty.
@@ -203,6 +209,9 @@ class VideoRecorder:
 
         # Zavřeme soubor s metadaty, pouze pokud je stále otevřený.
         if self._metadata_file and not self._metadata_file.closed:
+            if self._metadata_pending_writes > 0:
+                self._metadata_file.flush()
+                self._metadata_pending_writes = 0
             self._metadata_file.close()
             logger.info("Metadata file closed → '%s'", self.metadata_path)
 
@@ -251,6 +260,7 @@ class VideoRecorder:
 
         # Krok 3 – otevřeme soubor metadat pro nový segment.
         self._metadata_file = open(self.metadata_path, "a", encoding="utf-8")  # noqa: WPS515
+        self._metadata_pending_writes = 0
 
         # Reset časovače segmentu.
         self._segment_start_time = time.monotonic()
