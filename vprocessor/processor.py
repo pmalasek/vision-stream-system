@@ -528,6 +528,7 @@ class VideoProcessor:
         # ── Profilování pipeline (volitelné, řízené konfigurací) ─────────
         profile_enabled: bool = self.config.PROFILE_PIPELINE
         profile_interval: float = max(1.0, self.config.PROFILE_LOG_INTERVAL_SECONDS)
+        detect_every_n: int = max(1, self.config.DETECT_EVERY_N)
         profile_window_start: float = time.time()
         profile_frame_count: int = 0
         detect_sum_ms: float = 0.0
@@ -538,8 +539,9 @@ class VideoProcessor:
 
         if profile_enabled:
             logger.info(
-                "Pipeline profiling ENABLED (interval=%.1f s)",
+                "Pipeline profiling ENABLED (interval=%.1f s, detect_every_n=%d)",
                 profile_interval,
+                detect_every_n,
             )
 
         try:
@@ -568,14 +570,37 @@ class VideoProcessor:
                 fps_frame_count += 1
                 timestamp = time.time()
 
-                # ── Detekce osob ───────────────────────────────────────────
+                # ── Detekce osob (volitelně pouze každý N-tý snímek) ───────
                 # detector.detect() vrátí anotovaný snímek (s nakreslenými boxy)
                 # a seznam detekovaných objektů jako slovníky.
                 detect_start_perf = time.perf_counter()
-                annotated_frame, detections = self.detector.detect(frame)
+                do_detect = ((self.frame_count - 1) % detect_every_n) == 0
+                if do_detect:
+                    annotated_frame, detections = self.detector.detect(frame)
+                    # Uložení detekcí pro další snímky i HTTP endpoint.
+                    self.latest_detections = detections
+                else:
+                    detections = list(self.latest_detections)
+                    annotated_frame = frame.copy()
+                    # Levné dokreslení posledních detekcí mezi inferenčními snímky.
+                    for det in detections:
+                        x1 = int(det.get("x1", 0))
+                        y1 = int(det.get("y1", 0))
+                        x2 = int(det.get("x2", 0))
+                        y2 = int(det.get("y2", 0))
+                        conf = float(det.get("confidence", 0.0))
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(
+                            annotated_frame,
+                            f"Person {conf * 100:.1f}%",
+                            (x1, max(0, y1 - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55,
+                            (0, 255, 0),
+                            1,
+                            cv2.LINE_AA,
+                        )
                 detect_end_perf = time.perf_counter()
-                # Uložení detekcí pro HTTP endpoint /api/detections.
-                self.latest_detections = detections
                 # Průběžné sčítání celkového počtu detekcí od spuštění.
                 self.total_detections += len(detections)
 

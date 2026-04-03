@@ -96,6 +96,10 @@ class Config:
     # Menší hodnota obvykle zrychlí detekci za cenu nižší přesnosti.
     YOLO_IMGSZ: int = int(os.getenv("YOLO_IMGSZ", "640"))
 
+    # Provádět inferenci pouze na každém N-tém snímku.
+    # 1 = inference na každém snímku (výchozí chování), 2/3 = vyšší FPS.
+    DETECT_EVERY_N: int = int(os.getenv("DETECT_EVERY_N", "1"))
+
     # Jak často flushovat JSONL metadata na disk (po kolika snímcích).
     # 1 = flush každého snímku (nejbezpečnější, ale pomalejší).
     METADATA_FLUSH_EVERY: int = int(os.getenv("METADATA_FLUSH_EVERY", "1"))
