@@ -72,6 +72,8 @@ services:
       - OUTPUT_DIR=/app/output
       - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.5}
+      - PROFILE_PIPELINE=${PROFILE_PIPELINE:-false}
+      - PROFILE_LOG_INTERVAL_SECONDS=${PROFILE_LOG_INTERVAL_SECONDS:-5}
       - PORT=8000
       - HOST=0.0.0.0
     volumes:
