@@ -29,6 +29,14 @@ type serverHandler struct {
 	mutex     sync.RWMutex
 	stream    *gortsplib.ServerStream
 	publisher *gortsplib.ServerSession
+
+	// write-error rate limiting – keeps the log readable when a slow consumer
+	// (e.g. vprocessor blocked on YOLO inference) can't drain the queue fast
+	// enough.  OnStreamWriteError is called by gortsplib for every dropped
+	// packet; we collapse the bursts into a single summary line.
+	writeErrMu      sync.Mutex
+	writeErrLastLog time.Time
+	writeErrDropped int
 }
 
 // OnConnOpen is called when a new TCP connection is opened.
@@ -173,14 +181,45 @@ func (sh *serverHandler) OnRecord(
 			return
 		}
 
-		if err := stream.WritePacketRTP(medi, pkt); err != nil {
-			log.Printf("[WARN] error relaying RTP packet: %v", err)
-		}
+		// Errors here (e.g. "write queue is full") are reported to
+		// OnStreamWriteError below; no need to log them twice.
+		_ = stream.WritePacketRTP(medi, pkt)
 	})
 
 	return &base.Response{
 		StatusCode: base.StatusOK,
 	}, nil
+}
+
+// OnStreamWriteError is called by gortsplib whenever it cannot deliver a
+// packet to a reader session (most commonly because the reader's outgoing
+// write queue is full, i.e. the consumer is slower than the producer).
+//
+// Root cause: vprocessor blocks cap.read() while running YOLO inference,
+// so it consumes frames at the inference rate (~10 fps) while the RTSP
+// source produces them at the capture rate (~30 fps).  The per-reader
+// write queue fills up and gortsplib drops the excess packets.
+//
+// To avoid log spam we rate-limit the message to at most one line every
+// 5 seconds, summarising how many packets were dropped in that window.
+func (sh *serverHandler) OnStreamWriteError(ctx *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
+	sh.writeErrMu.Lock()
+	sh.writeErrDropped++
+	count := sh.writeErrDropped
+	lastLog := sh.writeErrLastLog
+	sh.writeErrMu.Unlock()
+
+	if time.Since(lastLog) >= 5*time.Second {
+		sh.writeErrMu.Lock()
+		sh.writeErrLastLog = time.Now()
+		sh.writeErrDropped = 0
+		sh.writeErrMu.Unlock()
+
+		log.Printf("[WARN] slow RTSP reader – write queue full, %d packet(s) dropped "+
+			"in the last 5 s. The consumer (vprocessor) is reading slower than the "+
+			"stream is produced. Consider a larger WriteQueueSize or decoupling "+
+			"RTSP reading from inference in vprocessor.", count)
+	}
 }
 
 // buildFFmpegArgs constructs the ffmpeg command-line arguments.
@@ -292,6 +331,12 @@ func main() {
 	srv := &gortsplib.Server{
 		Handler:     h,
 		RTSPAddress: fmt.Sprintf(":%d", *port),
+		// Increase the per-reader outgoing packet queue beyond the default
+		// of 256 so that brief bursts of slow consumption (e.g. during a
+		// heavy YOLO inference frame) don't immediately overflow.  At
+		// ~30 fps with typical H.264 fragmentation (~5 RTP packets/frame)
+		// this gives roughly 6 seconds of headroom instead of ~1.7 s.
+		WriteQueueSize: 1024,
 	}
 
 	// Enable UDP transport so clients like VLC can connect without --rtsp-tcp.

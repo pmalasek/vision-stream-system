@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
+import numpy as np
 from config import Config
 from detector import PersonDetector
 from recorder import VideoRecorder
@@ -56,23 +57,43 @@ def _suppress_c_stderr():
 class VideoProcessor:
     """Drives the capture → detect → annotate → record → broadcast pipeline.
 
-    The OpenCV loop runs inside a ``ThreadPoolExecutor`` as a plain synchronous
-    function so it never blocks the asyncio event loop.  The main event loop
-    is captured in :meth:`start` and stored as ``_main_loop`` so that
-    Socket.IO coroutines can be scheduled onto it via
-    ``asyncio.run_coroutine_threadsafe``.
+    Two-thread design
+    -----------------
+    The pipeline is split across two dedicated worker threads to prevent YOLO
+    inference latency (~100 ms) from starving the RTSP network buffer drain
+    (~33 ms/frame):
+
+    * **Frame grabber** (``_grabber_executor``) — runs
+      :meth:`_sync_frame_grabber`, which owns all RTSP
+      connection/reconnection logic and calls ``cap.read()`` in a tight loop.
+      Each successfully decoded frame is written to ``_latest_raw_frame`` and
+      ``_raw_frame_event`` is set so the processing thread can pick it up.
+
+    * **Processing thread** (``_executor``) — runs
+      :meth:`_sync_processing_loop`, which waits on ``_raw_frame_event``,
+      takes the latest raw frame, runs YOLO inference, encodes the result to
+      JPEG, writes to disk, and emits Socket.IO events.
+
+    Both threads run inside ``ThreadPoolExecutor`` instances so they never
+    block the asyncio event loop.  The main event loop is captured in
+    :meth:`start` and stored as ``_main_loop`` so that Socket.IO coroutines
+    can be scheduled onto it via ``asyncio.run_coroutine_threadsafe``.
 
     Shutdown contract
     -----------------
-    Calling :meth:`stop` does three things in order so the worker thread exits
-    as quickly as possible:
+    Calling :meth:`stop` does the following so both worker threads exit as
+    quickly as possible:
 
-    1. Sets ``self.running = False`` — the loop condition and the post-read
-       guard both check this flag.
+    1. Sets ``self.running = False`` — the loop condition in both threads
+       checks this flag.
     2. Sets ``self._stop_event`` — any ``_stop_event.wait(timeout)`` call
-       (used instead of ``time.sleep``) returns *immediately* rather than
-       sleeping the full retry delay.
-    3. Releases ``self._cap`` under ``_cap_lock`` — this closes the network
+       (used instead of ``time.sleep`` in the grabber) returns *immediately*
+       rather than sleeping the full retry delay.
+    3. Sets ``self._raw_frame_event`` — wakes the processing thread
+       immediately if it is currently blocking inside
+       ``_raw_frame_event.wait()``, preventing it from waiting the full 0.5 s
+       timeout.
+    4. Releases ``self._cap`` under ``_cap_lock`` — this closes the network
        socket so the blocking ``cap.read()`` call inside the FFmpeg decoder
        returns right away with ``ret=False`` instead of waiting for the next
        frame to arrive.  Without this step, the FFmpeg threads keep decoding
@@ -124,6 +145,25 @@ class VideoProcessor:
         self._cap: cv2.VideoCapture | None = None
         self._cap_lock = threading.Lock()
 
+        # ------------------------------------------------------------------
+        # Frame grabber – dedicated thread that drains the RTSP buffer
+        # continuously so YOLO inference never blocks the network read.
+        # ------------------------------------------------------------------
+        self._grabber_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="grabber"
+        )
+
+        # Latest raw frame shared between the grabber and the processing
+        # thread.  Guarded by _raw_frame_lock; always overwritten with the
+        # newest frame.
+        self._latest_raw_frame: np.ndarray | None = None
+        self._raw_frame_lock = threading.Lock()
+
+        # Set by the grabber whenever a new frame is stored; cleared by the
+        # processing thread after it takes the frame.  Also set by stop() to
+        # immediately unblock the processing thread.
+        self._raw_frame_event = threading.Event()
+
     # ------------------------------------------------------------------
     # Public async API
     # ------------------------------------------------------------------
@@ -136,6 +176,7 @@ class VideoProcessor:
 
         self.running = True
         self._stop_event.clear()
+        self._raw_frame_event.clear()
         self._start_time = time.time()
         self.status = "starting"
 
@@ -144,30 +185,42 @@ class VideoProcessor:
         self._main_loop = asyncio.get_running_loop()
 
         logger.info("Starting VideoProcessor …")
-        await self._main_loop.run_in_executor(
+
+        grabber = self._main_loop.run_in_executor(
+            self._grabber_executor, self._sync_frame_grabber
+        )
+        processor = self._main_loop.run_in_executor(
             self._executor, self._sync_processing_loop
         )
+
+        # Await both threads.  return_exceptions=True ensures that if one
+        # raises the other is still awaited before start() returns.
+        results = await asyncio.gather(grabber, processor, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                logger.error("Thread exited with exception: %s", r)
 
     async def stop(self) -> None:
         """Signal the processing loop to stop.
 
         This method only *signals* – it does **not** block waiting for the
-        worker thread to exit.  The caller (``main.py`` lifespan) is
+        worker threads to exit.  The caller (``main.py`` lifespan) is
         responsible for waiting by monitoring ``_processor_task``.
 
         Steps
         -----
-        1. ``self.running = False`` — loop guard + post-read guard.
+        1. ``self.running = False`` — loop guard in both threads.
         2. ``_stop_event.set()`` — wakes every ``_stop_event.wait()`` call
            (used instead of ``time.sleep``) so they return immediately.
-        3. ``_cap.release()`` — closes the RTSP socket so a blocking
+        3. ``_raw_frame_event.set()`` — wakes the processing thread so it
+           exits from ``_raw_frame_event.wait()`` immediately instead of
+           waiting the full 0.5 s timeout.
+        4. ``_cap.release()`` — closes the RTSP socket so a blocking
            ``cap.read()`` returns right away with ``ret=False``.
            Guarded by ``_cap_lock`` to avoid racing with the reconnect
-           section of the worker thread.
-        4. ``executor.shutdown(wait=False)`` — marks the pool as shutting
-           down so no new tasks can be submitted.  Because we've already
-           signalled the worker, it will exit on its own; we don't block
-           here.  Actual completion is tracked via ``_processor_task``.
+           section of the grabber thread.
+        5. Both ``executor`` and ``grabber_executor`` are shut down
+           (non-blocking).
         """
         logger.info("Stopping VideoProcessor …")
         self.running = False
@@ -176,9 +229,13 @@ class VideoProcessor:
         # Wake any thread sleeping inside _stop_event.wait().
         self._stop_event.set()
 
+        # Wake the processing thread so it exits from _raw_frame_event.wait()
+        # immediately instead of waiting the full 0.5 s timeout.
+        self._raw_frame_event.set()
+
         # Release the VideoCapture so that a blocking cap.read() returns
         # immediately with ret=False.  Guarded by a lock so we don't race
-        # with the worker thread swapping out self._cap on reconnect.
+        # with the grabber thread swapping out self._cap on reconnect.
         with self._cap_lock:
             if self._cap is not None:
                 try:
@@ -187,10 +244,11 @@ class VideoProcessor:
                     logger.debug("Ignoring error while releasing cap on stop: %s", exc)
                 self._cap = None
 
-        # Mark the executor as shut-down (non-blocking).  The worker thread
-        # will exit naturally after seeing running=False / _stop_event; the
-        # executor pool is freed once that happens.
+        # Mark both executors as shut-down (non-blocking).  The worker
+        # threads will exit naturally after seeing running=False / events
+        # being set; the executor pools are freed once that happens.
         self._executor.shutdown(wait=False)
+        self._grabber_executor.shutdown(wait=False)
         logger.info("VideoProcessor stop signal sent.")
 
     def get_latest_frame(self) -> bytes | None:
@@ -199,30 +257,23 @@ class VideoProcessor:
             return self.latest_frame
 
     # ------------------------------------------------------------------
-    # Internal – runs in the ThreadPoolExecutor worker thread
+    # Internal – runs in the ThreadPoolExecutor worker threads
     # ------------------------------------------------------------------
 
-    def _sync_processing_loop(self) -> None:
-        """Purely synchronous OpenCV / YOLO loop – safe to run in any thread.
+    def _sync_frame_grabber(self) -> None:
+        """Continuously reads raw frames from the RTSP stream.
 
-        All I/O that must reach the async world (Socket.IO events) is
-        dispatched via ``asyncio.run_coroutine_threadsafe``.
+        Runs in a dedicated thread so that ``cap.read()`` is never blocked by
+        YOLO inference.  Each acquired frame overwrites ``_latest_raw_frame``
+        and sets ``_raw_frame_event`` so the processing thread can pick it up.
         """
-        # Local reference to the VideoCapture kept in sync with self._cap so
-        # that stop() can release it externally without a use-after-free.
         cap: cv2.VideoCapture | None = None
-
-        fps_frame_count: int = 0
-        fps_timer: float = time.time()
-        last_stats_time: float = time.time()
 
         try:
             while self.running:
                 # ── Connect / reconnect ────────────────────────────────
                 if cap is None or not cap.isOpened():
                     if cap is not None:
-                        # Clear the shared reference before releasing so that
-                        # stop() doesn't try to release an already-gone cap.
                         with self._cap_lock:
                             self._cap = None
                         cap.release()
@@ -277,19 +328,13 @@ class VideoProcessor:
                     logger.info("RTSP stream opened successfully.")
                     self.status = "streaming"
 
-                # ── Read a frame ───────────────────────────────────────
-                # Guard: if stop() was called while we were in the reconnect
-                # block (so _cap was None at the time and wasn't released),
-                # bail out *before* starting a new blocking read.
+                # Guard: bail out before starting a new read after stop().
                 if self._stop_event.is_set():
                     break
 
+                # ── Read a frame ───────────────────────────────────────
                 ret, frame = cap.read()
 
-                # Check the stop flag before starting any heavy work.
-                # stop() may have released the cap from outside, which
-                # causes cap.read() to return (False, None); we want to
-                # exit cleanly rather than log a spurious reconnect warning.
                 if not self.running:
                     break
 
@@ -307,6 +352,58 @@ class VideoProcessor:
                     # Interruptible sleep – exits immediately if stop() fires.
                     if self._stop_event.wait(RTSP_RETRY_DELAY):
                         break
+                    continue
+
+                # ── Share with processing thread ───────────────────────
+                # Always overwrite so the processor always gets the latest
+                # frame; the old frame is simply dropped if the processor
+                # hasn't consumed it yet.
+                with self._raw_frame_lock:
+                    self._latest_raw_frame = frame
+                self._raw_frame_event.set()
+
+        except Exception as exc:
+            logger.exception("Unexpected error in frame grabber: %s", exc)
+            self.status = "error"
+
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                with self._cap_lock:
+                    self._cap = None
+                logger.info("VideoCapture released (grabber).")
+
+            # Wake the processing thread so it can exit cleanly even if it
+            # is currently waiting inside _raw_frame_event.wait().
+            self._raw_frame_event.set()
+            logger.info("Frame grabber exited (status=%s).", self.status)
+
+    def _sync_processing_loop(self) -> None:
+        """Runs YOLO inference on the latest raw frame from ``_sync_frame_grabber``.
+
+        Deliberately decoupled from RTSP reading so that inference latency
+        never starves the network buffer drain in the grabber thread.
+        """
+        fps_frame_count: int = 0
+        fps_timer: float = time.time()
+        last_stats_time: float = time.time()
+
+        try:
+            while self.running:
+                # ── Wait for a new raw frame ───────────────────────────
+                # Timeout of 0.5 s lets us re-check self.running periodically
+                # even when no frames arrive (e.g. stream not yet connected).
+                if not self._raw_frame_event.wait(timeout=0.5):
+                    continue
+                self._raw_frame_event.clear()
+
+                with self._raw_frame_lock:
+                    frame = self._latest_raw_frame
+
+                if frame is None or not self.running:
                     continue
 
                 self.frame_count += 1
@@ -344,7 +441,7 @@ class VideoProcessor:
                 }
                 self._emit(self.sio.emit("detection", detection_payload))
 
-                # Update FPS counter
+                # ── Update FPS counter ─────────────────────────────────
                 now = time.time()
                 elapsed_fps = now - fps_timer
                 if elapsed_fps >= 1.0:
@@ -362,24 +459,12 @@ class VideoProcessor:
             self.status = "error"
 
         finally:
-            # ── Clean up on exit ───────────────────────────────────────
-            # stop() may have already released self._cap; releasing the local
-            # reference again is harmless (VideoCapture.release() is idempotent).
-            if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
-                with self._cap_lock:
-                    self._cap = None
-                logger.info("VideoCapture released.")
-
             try:
                 self.recorder.release()
             except Exception as exc:
                 logger.error("Error releasing recorder: %s", exc)
 
-            logger.info("Processing loop exited (status=%s).", self.status)
+            logger.info("Processing loop exited.")
 
     # ------------------------------------------------------------------
     # Helpers
