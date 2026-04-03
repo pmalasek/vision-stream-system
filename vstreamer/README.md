@@ -1,62 +1,87 @@
 # vstreamer
 
-A Go RTSP streaming server that serves a video file as an RTSP stream on port 8554, behaving like an IP camera. It uses [gortsplib v4](https://github.com/bluenviron/gortsplib) as the RTSP server and spawns `ffmpeg` as a subprocess to decode/re-encode and publish the video.
+RTSP relay server napsaný v Go. Slouží k přehrávání video souboru jako RTSP streamu – chová se jako IP kamera. Jako RTSP server využívá knihovnu [gortsplib v4](https://github.com/bluenviron/gortsplib) a spouští `ffmpeg` jako podproces, který video publikuje do serveru.
 
-## How It Works
-
-1. A gortsplib v4 RTSP server starts and listens for connections.
-2. `ffmpeg` is spawned as a subprocess and publishes the video to the server via RTSP (`ANNOUNCE` + `RECORD`).
-3. Readers (e.g. `vprocessor`/OpenCV) connect to the server and receive the relayed stream.
-4. When `ffmpeg` exits (video ends), it is automatically restarted if `--loop` is `true`.
+## Jak to funguje
 
 ```
-Video File → ffmpeg → vstreamer (RTSP relay) → vprocessor / OpenCV
+Video soubor → ffmpeg → vstreamer (RTSP relay) → vprocessor / OpenCV
 ```
 
-## Prerequisites
+1. Spustí se gortsplib RTSP server a začne naslouchat na zvoleném portu.
+2. Po 500 ms se spustí `ffmpeg` jako podproces a pošle do serveru `ANNOUNCE` + `RECORD`.
+3. Čtenáři (např. `vprocessor` / OpenCV) se připojí a dostávají přeposílaný stream.
+4. Po skončení videa se `ffmpeg` automaticky restartuje, pokud je povoleno `--loop`.
+
+## Požadavky
 
 - Go 1.21+
-- `ffmpeg` with `libx264` support installed and available in `PATH`
+- `ffmpeg` s podporou `libx264` dostupný v `PATH`
 
-## Build
+## Sestavení a spuštění
 
 ```sh
 go mod tidy
 go build -o vstreamer .
+./vstreamer --video /cesta/k/videu.mp4
 ```
 
-## Usage
+## Příznaky CLI
 
-### Minimal (loop enabled by default)
+| Příznak | Typ | Výchozí | Popis |
+|---------|-----|---------|-------|
+| `--video` | string | *(povinné)* | Cesta k vstupnímu video souboru |
+| `--port` | int | `8554` | Port RTSP serveru |
+| `--udp-rtp` | int | `8000` | UDP port pro RTP pakety (0 = zakázat UDP) |
+| `--udp-rtcp` | int | `8001` | UDP port pro RTCP pakety (0 = zakázat UDP) |
+| `--path` | string | `live` | Segment cesty RTSP streamu |
+| `--loop` | bool | `true` | Opakování videa po skončení |
+
+### Příklady
+
+Minimální spuštění (smyčka povolena ve výchozím stavu):
 
 ```sh
-./vstreamer --video /path/to/video.mp4
+./vstreamer --video /cesta/k/videu.mp4
 ```
 
-### Full options
+Vypnutí smyčky (stream skončí spolu s videem):
 
 ```sh
-./vstreamer --video /path/to/video.mp4 --port 8554 --path live --loop true
+./vstreamer --video /cesta/k/videu.mp4 --loop false
 ```
 
-### Disable looping (stream ends when video ends)
+Vlastní porty a cesta:
 
 ```sh
-./vstreamer --video /path/to/video.mp4 --loop false
+./vstreamer --video /cesta/k/videu.mp4 --port 8554 --udp-rtp 8556 --udp-rtcp 8557 --path live
 ```
 
-## Flags
+## ffmpeg argumenty
 
-| Flag      | Type   | Default | Description                                      |
-|-----------|--------|---------|--------------------------------------------------|
-| `--video` | string | *(required)* | Path to the input video file               |
-| `--port`  | int    | `8554`  | RTSP server port                                 |
-| `--path`  | string | `live`  | RTSP stream path segment                         |
-| `--loop`  | bool   | `true`  | Restart ffmpeg and loop the video when it ends   |
+`buildFFmpegArgs` sestaví následující příkaz:
 
-## Connecting a Reader
+```sh
+ffmpeg -re -stream_loop -1 -i <soubor> \
+  -c:v libx264 -preset ultrafast -tune zerolatency \
+  -pix_fmt yuv420p -an \
+  -rtsp_transport tcp -f rtsp rtsp://127.0.0.1:<port>/<path>
+```
 
-Once `vstreamer` is running, any RTSP-capable client can connect:
+- `-re` – čte vstup v reálném čase (simulace kamery)
+- `-stream_loop -1` – nekonečná smyčka (jen pokud `--loop=true`)
+- `-an` – audio je odstraněno, stream je pouze video (H.264, yuv420p)
+- `-rtsp_transport tcp` – transport ffmpeg → server probíhá přes TCP
+
+## UDP transport
+
+Ve výchozím stavu jsou UDP porty nastaveny na `8000` (RTP) a `8001` (RTCP). Oba porty musí být nenulové, aby byl UDP povolen; jinak server přijímá pouze TCP připojení.
+
+> **Poznámka:** V `docker-compose.yml` jsou UDP porty přepsány na `8556`/`8557`, aby nedocházelo ke kolizím s jiným softwarem.
+
+## Připojení čtenáře
+
+Po spuštění `vstreamer` se k němu může připojit jakýkoli RTSP klient:
 
 ```
 rtsp://localhost:8554/live
@@ -69,47 +94,57 @@ import cv2
 cap = cv2.VideoCapture("rtsp://localhost:8554/live")
 ```
 
-### OpenCV (C++)
-
-```cpp
-cv::VideoCapture cap("rtsp://localhost:8554/live");
-```
-
-### FFplay
+### ffplay
 
 ```sh
 ffplay rtsp://localhost:8554/live
 ```
 
-### VLC
+### VLC (UDP – výchozí)
 
 ```sh
 vlc rtsp://localhost:8554/live
 ```
 
+### VLC (TCP)
+
+```sh
+vlc --rtsp-tcp rtsp://localhost:8554/live
+```
+
 ## Docker
 
-### Build
+### Sestavení
 
 ```sh
 docker build -t vstreamer .
 ```
 
-### Run
+### Spuštění
 
 ```sh
 docker run --rm \
   -p 8554:8554 \
-  -v /path/to/videos:/videos \
-  vstreamer --video /videos/sample.mp4
+  -p 8556:8556/udp \
+  -p 8557:8557/udp \
+  -v /cesta/k/videam:/videos \
+  vstreamer --video /videos/sample.mp4 --udp-rtp 8556 --udp-rtcp 8557
 ```
 
-## Notes
+## Struktura projektu
 
-- Audio is stripped (`-an`) — the stream is video-only H.264 in yuv420p pixel format.
-- The server uses TCP transport for the ffmpeg → server leg (`-rtsp_transport tcp`).
-- `ffmpeg` is encoded with `libx264 -preset ultrafast -tune zerolatency` for minimal latency.
-- The server starts **before** ffmpeg is spawned (500 ms delay) to ensure it is ready to accept the ANNOUNCE.
+```
+vstreamer/
+├── main.go        # celá implementace
+├── go.mod
+├── go.sum
+└── Dockerfile
 ```
 
-Now let me run `go mod tidy` to generate the `go.sum` and resolve all transitive dependencies:
+## Poznámky
+
+- **WriteQueueSize** je nastaven na `1024` (výchozí hodnota gortsplib je 256). Při ~30 fps a typické H.264 fragmentaci (~5 RTP paketů/snímek) to poskytuje přibližně 6 sekund rezervy místo původních ~1,7 s.
+- **Rate-limiting chyb zápisu:** pokud pomalý čtenář (např. vprocessor blokovaný YOLO inferencí) nestíhá odebírat pakety, gortsplib volá `OnStreamWriteError` pro každý zahozený paket. Aby byl log čitelný, zaznamenává se souhrnná hláška nejvýše jednou za 5 sekund.
+- Leg ffmpeg → server vždy probíhá přes TCP (`-rtsp_transport tcp`). UDP transport se týká pouze připojení čtenářů.
+- Server se spustí před `ffmpeg` a čeká 500 ms, aby byl připraven přijmout `ANNOUNCE`.
+- Graceful shutdown je zajištěn zachycením signálů `SIGINT` a `SIGTERM`.

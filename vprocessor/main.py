@@ -40,6 +40,14 @@ _processor_task: asyncio.Task | None = None
 _start_time: float = 0.0
 _connected_clients: int = 0
 
+# Reference to the running uvicorn.Server instance.  Set by the __main__
+# entry-point so the MJPEG /stream generator can read server.should_exit
+# and close the HTTP response before the lifespan cleanup needs to run.
+# When the module is started via `python -m uvicorn` this stays None and
+# the generator falls back to the normal infinite loop (still cancellable
+# via asyncio task cancellation on force-exit).
+_uvicorn_server = None  # uvicorn.Server | None
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -164,7 +172,12 @@ async def mjpeg_stream():
     """
 
     async def generate():
-        while True:
+        # Stop as soon as uvicorn signals it wants to shut down.
+        # Exiting here closes the HTTP connection, which unblocks uvicorn's
+        # "waiting for connections" phase so the lifespan cleanup (and
+        # therefore processor.stop()) can actually run — without the caller
+        # having to press Ctrl-C a second time.
+        while _uvicorn_server is None or not _uvicorn_server.should_exit:
             if processor is None:
                 await asyncio.sleep(0.1)
                 continue
@@ -263,3 +276,28 @@ async def api_detections(limit: int = 100, offset: int = 0):
             continue
 
     return records[offset : offset + limit]
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Build the server object before calling run() so that the global
+    # _uvicorn_server reference is available to the MJPEG generator from
+    # the very first request.
+    _cfg = uvicorn.Config(
+        socket_app,
+        host=config.HOST,
+        port=config.PORT,
+        # Safety net: if open connections (e.g. MJPEG /stream) have not
+        # closed themselves within 3 s after the first SIGINT, uvicorn
+        # force-closes them so the lifespan cleanup can proceed.
+        # In practice the /stream generator exits in ≤33 ms once it reads
+        # server.should_exit = True, so this timeout is almost never hit.
+        timeout_graceful_shutdown=3,
+    )
+    _uvicorn_server = uvicorn.Server(_cfg)
+    _uvicorn_server.run()

@@ -1,185 +1,144 @@
 # vprocessor
 
-A Python FastAPI service that ingests an RTSP video stream, detects persons using YOLOv8, and serves the annotated output as an MJPEG stream while broadcasting real-time detection metadata over Socket.IO.
+Python FastAPI služba, která přijímá RTSP video stream, detekuje osoby pomocí YOLOv8 a streamuje anotovaný výstup jako MJPEG, zatímco v reálném čase vysílá detekční metadata přes Socket.IO.
 
 ---
 
-## Table of Contents
+## Obsah
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Requirements](#requirements)
-- [Setup](#setup)
-  - [Local (venv)](#local-venv)
+- [Přehled](#přehled)
+- [Architektura](#architektura)
+- [Požadavky](#požadavky)
+- [Konfigurace](#konfigurace)
+- [Spuštění](#spuštění)
+  - [Lokálně (venv)](#lokálně-venv)
   - [Docker](#docker)
-- [Configuration](#configuration)
-- [Running](#running)
-  - [Local](#local)
-  - [Docker Compose](#docker-compose)
-- [API Reference](#api-reference)
-  - [HTTP Endpoints](#http-endpoints)
-  - [Socket.IO Events](#socketio-events)
-- [Output Files](#output-files)
-- [Project Structure](#project-structure)
+- [HTTP API](#http-api)
+- [Socket.IO události](#socketio-události)
+- [Výstupní soubory](#výstupní-soubory)
+- [Struktura projektu](#struktura-projektu)
 
 ---
 
-## Overview
+## Přehled
 
-| Capability | Detail |
+| Schopnost | Detail |
 |---|---|
-| Input | RTSP stream (e.g. from **vstreamer** at `rtsp://localhost:8554/live`) |
-| Detection | YOLOv8n – person class only (class 0) |
-| Live output | MJPEG stream at `GET /stream` |
-| Real-time events | Socket.IO `detection` + `stats` events |
-| Disk output | Timestamped MP4 video + JSONL metadata |
+| Vstup | RTSP stream (např. z **vstreamer** na `rtsp://localhost:8554/live`) |
+| Detekce | YOLOv8n – pouze třída 0 (osoby) |
+| Živý výstup | MJPEG stream na `GET /stream` |
+| Real-time události | Socket.IO události `detection` a `stats` |
+| Výstup na disk | Anotované MP4 video + JSONL metadata |
 
 ---
 
-## Architecture
+## Architektura
+
+Služba je postavena na **dvouvláknovém designu** v `processor.py`:
+
+- **Frame grabber** (`_grabber_executor`) – drží RTSP spojení, volá `cap.read()` v těsné smyčce a ukládá poslední surový snímek do `_latest_raw_frame`, poté nastavuje `_raw_frame_event`.
+- **Processing thread** (`_executor`) – čeká na `_raw_frame_event`, bere nejnovější surový snímek, spouští YOLO inferenci, kóduje JPEG, zapisuje na disk a vysílá Socket.IO události.
+
+Oba procesy běží v `ThreadPoolExecutor` a neblokují asyncio event loop.
+
+Při ukončení `stop()` nastaví `running=False`, `_stop_event` a `_raw_frame_event`, čímž zajistí okamžité dokončení obou vláken.
 
 ```
-RTSP source
+RTSP zdroj
     │
     ▼
-cv2.VideoCapture           (background thread via run_in_executor)
+cv2.VideoCapture           (vlákno přes run_in_executor)
     │
     ▼
-PersonDetector             (YOLOv8 inference, bounding-box drawing)
+PersonDetector             (YOLOv8 inference, kreslení ohraničujících rámečků)
     │
     ├──► VideoRecorder     (MP4 + JSONL → output/<timestamp>/)
     │
-    ├──► latest_frame      (JPEG bytes, read by /stream endpoint)
+    ├──► latest_frame      (JPEG bajty, čte endpoint /stream)
     │
-    └──► Socket.IO         ("detection" and "stats" events → clients)
+    └──► Socket.IO         (události "detection" a "stats" → klienti)
 ```
 
 ---
 
-## Requirements
+## Požadavky
 
 - Python 3.11+
-- The packages listed in `requirements.txt`
-- An RTSP source (e.g. the **vstreamer** service)
+- Závislosti v `requirements.txt`
+- Dostupný RTSP zdroj (např. služba **vstreamer**)
 
-On first run ultralytics will automatically download the YOLOv8 weights file (`yolov8n.pt`, ~6 MB) if it is not already present locally.
+Při prvním spuštění ultralytics automaticky stáhne váhy YOLOv8n (`yolov8n.pt`, ~6 MB) do adresáře `models/`.
 
 ---
 
-## Setup
+## Konfigurace
 
-### Local (venv)
+Veškerá nastavení jsou načítána z proměnných prostředí. Lze je nastavit přímo nebo přes soubor `.env` v adresáři `vprocessor/`.
+
+| Proměnná | Výchozí hodnota | Popis |
+|---|---|---|
+| `RTSP_URL` | `rtsp://localhost:8554/live` | Adresa vstupního RTSP streamu |
+| `RTSP_TRANSPORT` | `tcp` | Transportní protokol pro RTSP (tcp/udp) |
+| `OUTPUT_DIR` | `./output` | Kořenový adresář pro nahrávky |
+| `YOLO_MODEL` | `yolov8n.pt` | Soubor s váhami YOLOv8 nebo název modelu |
+| `CONFIDENCE_THRESHOLD` | `0.5` | Minimální práh spolehlivosti (0.0 – 1.0) |
+| `HOST` | `0.0.0.0` | Bind adresa pro uvicorn |
+| `PORT` | `8000` | Bind port pro uvicorn |
+
+> **Poznámka:** `RTSP_TRANSPORT=tcp` je výchozí, aby se předešlo H.264 artefaktům při ztrátě UDP paketů.
+
+---
+
+## Spuštění
+
+### Lokálně (venv)
 
 ```bash
-# 1. Clone / navigate to the service directory
-cd vision-stream-system/vprocessor
-
-# 2. Create and activate a virtual environment
+cd vprocessor
 python3.11 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# 3. Install dependencies
-pip install --no-cache-dir -r requirements.txt
-
-# 4. Copy and edit the environment file
-cp .env.example .env
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
 ```
 
-Edit `.env` to point `RTSP_URL` at your stream source before continuing.
+Nebo přímo přes uvicorn:
+
+```bash
+uvicorn main:socket_app --host 0.0.0.0 --port 8000 --reload
+```
+
+Pokud RTSP zdroj není dostupný, služba se každé 2 sekundy pokusí o znovupřipojení a zaloguje varování. HTTP endpointy a Socket.IO zůstávají dostupné po celou dobu.
 
 ### Docker
 
 ```bash
-cd vision-stream-system/vprocessor
-docker build -t vprocessor:latest .
+docker build -t vprocessor .
+docker run -p 8000:8000 \
+  -e RTSP_URL=rtsp://host.docker.internal:8554/live \
+  -v ./output:/app/output \
+  vprocessor
 ```
 
 ---
 
-## Configuration
+## HTTP API
 
-All settings are read from environment variables (and from a `.env` file when running locally).
+### `GET /stream`
 
-| Variable | Default | Description |
-|---|---|---|
-| `RTSP_URL` | `rtsp://localhost:8554/live` | Full RTSP URL of the input stream |
-| `OUTPUT_DIR` | `./output` | Root directory for recorded sessions |
-| `YOLO_MODEL` | `yolov8n.pt` | YOLOv8 weights file or model name |
-| `CONFIDENCE_THRESHOLD` | `0.5` | Minimum detection confidence (0.0 – 1.0) |
-| `HOST` | `0.0.0.0` | Bind address for uvicorn |
-| `PORT` | `8000` | Bind port for uvicorn |
-
-Copy `.env.example` to `.env` and adjust the values as needed:
-
-```bash
-cp .env.example .env
-```
-
----
-
-## Running
-
-### Local
-
-```bash
-# Make sure your .env is configured, then:
-source .venv/bin/activate
-python -m uvicorn main:socket_app --host 0.0.0.0 --port 8000 --reload
-```
-
-If the RTSP source is not yet available the service will keep retrying the connection every 2 seconds and log a warning. All HTTP endpoints and Socket.IO remain available during that time.
-
-### Docker Compose
-
-Add the following service block to your project's `docker-compose.yml`:
-
-```yaml
-vprocessor:
-  build: ./vprocessor
-  ports:
-    - "8000:8000"
-  environment:
-    RTSP_URL: rtsp://vstreamer:8554/live
-    OUTPUT_DIR: /app/output
-    YOLO_MODEL: yolov8n.pt
-    CONFIDENCE_THRESHOLD: "0.5"
-  volumes:
-    - ./vprocessor/output:/app/output
-  depends_on:
-    - vstreamer
-```
-
-Then start the stack:
-
-```bash
-docker compose up --build
-```
-
----
-
-## API Reference
-
-### HTTP Endpoints
-
-#### `GET /stream`
-
-MJPEG stream of the annotated video feed. Suitable for embedding directly in a browser:
+MJPEG stream anotovaného videa. Lze vložit přímo do prohlížeče:
 
 ```html
 <img src="http://localhost:8000/stream" />
 ```
 
 - **Media type:** `multipart/x-mixed-replace; boundary=frame`
-- **CORS:** allowed from all origins
-- **Frame rate:** up to 30 fps (async yield-based)
+- **CORS:** povoleno ze všech zdrojů
 
 ---
 
-#### `GET /health`
+### `GET /health`
 
-Liveness / readiness probe.
-
-**Response**
+Liveness/readiness probe.
 
 ```json
 {
@@ -190,15 +149,11 @@ Liveness / readiness probe.
 }
 ```
 
-Possible `status` values: `starting`, `connecting`, `streaming`, `reconnecting`, `stopped`.
-
 ---
 
-#### `GET /api/stats`
+### `GET /api/stats`
 
-Current processing statistics snapshot.
-
-**Response**
+Aktuální statistiky zpracování.
 
 ```json
 {
@@ -210,30 +165,27 @@ Current processing statistics snapshot.
 }
 ```
 
+Možné hodnoty `status`: `idle`, `starting`, `connecting`, `streaming`, `reconnecting`, `stopped`.
+
 ---
 
-#### `GET /api/detections`
+### `GET /api/detections?limit=100&offset=0`
 
-Read persisted detection records from the current session JSONL file.
+Historie detekcí ze JSONL souboru aktuální relace.
 
-**Query parameters**
-
-| Parameter | Type | Default | Description |
+| Parametr | Typ | Výchozí | Popis |
 |---|---|---|---|
-| `limit` | integer | `100` | Maximum records to return |
-| `offset` | integer | `0` | Records to skip |
-
-**Response** – array of detection records:
+| `limit` | integer | `100` | Maximální počet vrácených záznamů |
+| `offset` | integer | `0` | Počet přeskočených záznamů |
 
 ```json
 [
   {
     "frame_id": 101,
     "timestamp": 1712345678.123,
-    "person_count": 2,
+    "person_count": 1,
     "detections": [
-      { "x1": 120, "y1": 45, "x2": 310, "y2": 480, "confidence": 0.9231 },
-      { "x1": 640, "y1": 80, "x2": 790, "y2": 460, "confidence": 0.8754 }
+      { "x1": 120, "y1": 45, "x2": 310, "y2": 480, "confidence": 0.9231 }
     ]
   }
 ]
@@ -241,13 +193,13 @@ Read persisted detection records from the current session JSONL file.
 
 ---
 
-### Socket.IO Events
+## Socket.IO události
 
-Connect to `http://localhost:8000` using any Socket.IO v5 client.
+Připojte se na `http://localhost:8000` libovolným Socket.IO v5 klientem (endpoint `/socket.io`).
 
-#### Server → Client: `detection`
+### Server → klient: `detection`
 
-Emitted on every processed frame.
+Odesláno pro každý zpracovaný snímek.
 
 ```json
 {
@@ -260,9 +212,9 @@ Emitted on every processed frame.
 }
 ```
 
-#### Server → Client: `stats`
+### Server → klient: `stats`
 
-Emitted once per second with aggregate statistics.
+Odesláno jednou za sekundu a ihned po připojení klienta (pro okamžité naplnění dashboardu).
 
 ```json
 {
@@ -274,44 +226,38 @@ Emitted once per second with aggregate statistics.
 }
 ```
 
-#### Server → Client: `stats` (on connect)
-
-Immediately after a client connects the server emits a `stats` event with the current snapshot so the dashboard can populate without waiting up to one second.
-
 ---
 
-## Output Files
+## Výstupní soubory
 
-Each time the service starts a new recording session is created under `OUTPUT_DIR`:
+Při každém spuštění se vytvoří nová nahrávací relace v `OUTPUT_DIR`:
 
-```
+```text
 output/
 └── 2024-04-05_14-32-10/
-    ├── output.mp4          ← annotated video (MP4, mp4v codec, 25 fps)
-    └── detections.jsonl    ← one JSON object per line, one line per frame
+    ├── output.mp4          ← anotované video (MP4, kodek mp4v, 25 fps)
+    └── detections.jsonl    ← jeden JSON objekt na řádek, jeden na snímek
 ```
 
-**JSONL record format:**
+Formát záznamu JSONL:
 
-```json
+```jsonl
 {"frame_id": 1, "timestamp": 1712345600.001, "person_count": 0, "detections": []}
 {"frame_id": 2, "timestamp": 1712345600.041, "person_count": 1, "detections": [{"x1": 50, "y1": 30, "x2": 200, "y2": 420, "confidence": 0.8812}]}
 ```
 
 ---
 
-## Project Structure
+## Struktura projektu
 
-```
+```text
 vprocessor/
-├── config.py          # Environment-based configuration
-├── detector.py        # PersonDetector – YOLOv8 inference + annotation
-├── recorder.py        # VideoRecorder  – MP4 + JSONL writer
-├── processor.py       # VideoProcessor – async pipeline orchestrator
-├── main.py            # FastAPI app, Socket.IO server, HTTP endpoints
+├── config.py          # konfigurace z proměnných prostředí
+├── detector.py        # PersonDetector – YOLOv8 inference + anotace
+├── recorder.py        # VideoRecorder – zápis MP4 + JSONL
+├── processor.py       # VideoProcessor – asynchronní pipeline orchestrátor
+├── main.py            # FastAPI aplikace, Socket.IO server, HTTP endpointy
 ├── requirements.txt
 ├── Dockerfile
-├── .env.example
-├── output/            # Created automatically; holds recording sessions
-└── README.md
+└── output/            # vytváří se automaticky; obsahuje nahrávky
 ```

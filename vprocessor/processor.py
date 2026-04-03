@@ -477,6 +477,9 @@ class VideoProcessor:
         (e.g. called before :meth:`start`) the coroutine is silently dropped.
         """
         if self._main_loop is None or self._main_loop.is_closed():
+            # The event loop is gone – discard the coroutine explicitly so
+            # Python does not emit "coroutine was never awaited" warnings.
+            coro.close()
             return
         asyncio.run_coroutine_threadsafe(coro, self._main_loop)
 

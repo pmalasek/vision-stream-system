@@ -14,4 +14,4 @@ COPY . .
 
 RUN mkdir -p output
 
-CMD ["python", "-m", "uvicorn", "main:socket_app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py"]

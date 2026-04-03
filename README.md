@@ -5,15 +5,15 @@ Systém pro real-time zpracování videa, který detekuje osoby ve video streamu
 ## Architektura
 
 ```
-┌─────────────────┐  RTSP :8554    ┌──────────────────────────────┐
+┌─────────────────┐  RTSP :8554    ┌───────────────────────────────┐
 │   vstreamer     │ ─────────────► │         vprocessor            │
 │     (Go)        │                │       (Python/FastAPI)        │
 │                 │                │                               │
-│ gortsplib v4    │                │  cv2.VideoCapture(rtsp://...) │
-│ + ffmpeg        │                │  YOLOv8 detekce osob          │
-│                 │                │  vykreslení rámečků           │
-│ Chová se jako   │                │  ukládání videa na disk       │
-│ IP kamera       │                │  ukládání metadat (JSONL)     │
+│ gortsplib v4    │                │  Frame grabber vlákno         │
+│ + ffmpeg        │                │  (drží RTSP, volá cap.read()) │
+│                 │                │                               │
+│ Chová se jako   │                │  Processing vlákno            │
+│ IP kamera       │                │  (YOLOv8 inference, JPEG)     │
 └─────────────────┘                │                               │
                                    │  GET  /stream   (MJPEG)       │
                                    │  WS   /socket.io              │
@@ -92,8 +92,8 @@ CONFIDENCE_THRESHOLD=0.5
 
 - Go 1.21+
 - Python 3.11+
-- Node.js 20+
-- ffmpeg (musí být dostupný v `PATH`)
+- Node.js 18+
+- ffmpeg s podporou `libx264` (musí být dostupný v `PATH`)
 
 ---
 
@@ -101,8 +101,9 @@ CONFIDENCE_THRESHOLD=0.5
 
 ```bash
 cd vstreamer
-go mod download
-go run . --video /cesta/k/videu.mp4
+go mod tidy
+go build -o vstreamer .
+./vstreamer --video /cesta/k/videu.mp4
 ```
 
 Dostupné přepínače:
@@ -111,10 +112,12 @@ Dostupné přepínače:
 |----------|-----------------|-------|
 | `--video` | *(povinné)* | Cesta ke vstupnímu video souboru |
 | `--port` | `8554` | Port RTSP serveru |
+| `--udp-rtp` | `8000` | UDP port pro RTP pakety (0 = zakázat UDP) |
+| `--udp-rtcp` | `8001` | UDP port pro RTCP pakety (0 = zakázat UDP) |
 | `--path` | `live` | Cesta RTSP streamu |
 | `--loop` | `true` | Opakování videa po skončení |
 
-Otestování pomocí VLC nebo ffplay:
+Otestování pomocí ffplay:
 
 ```bash
 ffplay rtsp://localhost:8554/live
@@ -126,13 +129,25 @@ ffplay rtsp://localhost:8554/live
 
 ```bash
 cd vprocessor
-python -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-cp .env.example .env             # uprav dle potřeby
-uvicorn main:socket_app --host 0.0.0.0 --port 8000 --reload
+python main.py
 ```
+
+Konfiguraci lze přepsat proměnnými prostředí nebo souborem `.env` v adresáři `vprocessor/`:
+
+| Proměnná | Výchozí | Popis |
+|----------|---------|-------|
+| `RTSP_URL` | `rtsp://localhost:8554/live` | Adresa vstupního RTSP streamu |
+| `RTSP_TRANSPORT` | `tcp` | Transportní protokol pro RTSP (`tcp` / `udp`) |
+| `OUTPUT_DIR` | `./output` | Kořenový adresář pro nahrávky |
+| `YOLO_MODEL` | `yolov8n.pt` | Soubor s váhami YOLOv8 nebo název modelu |
+| `CONFIDENCE_THRESHOLD` | `0.5` | Minimální práh spolehlivosti (0.0 – 1.0) |
+| `HOST` | `0.0.0.0` | Bind adresa pro uvicorn |
+| `PORT` | `8000` | Bind port pro uvicorn |
+
+> **Poznámka:** `RTSP_TRANSPORT=tcp` je výchozí, aby se předešlo H.264 artefaktům způsobeným ztrátou UDP paketů.
 
 Dostupné API endpointy:
 
@@ -142,7 +157,7 @@ Dostupné API endpointy:
 | `GET` | `/health` | Zdravotní stav služby + statistiky |
 | `GET` | `/api/stats` | Aktuální statistiky zpracování |
 | `GET` | `/api/detections?limit=100&offset=0` | Historie detekcí ze souboru JSONL |
-| `WS` | `/socket.io` | Real-time události (detection, stats) |
+| `WS` | `/socket.io` | Real-time události (`detection`, `stats`) |
 
 Socket.IO události vysílané serverem:
 
@@ -150,20 +165,20 @@ Socket.IO události vysílané serverem:
 // "detection" — odesláno při každém zpracovaném snímku
 {
   "frame_id": 42,
-  "timestamp": "2024-01-15T10:30:00Z",
+  "timestamp": 1712345678.123,
   "person_count": 2,
   "detections": [
     { "x1": 100, "y1": 80, "x2": 200, "y2": 400, "confidence": 0.91 }
   ]
 }
 
-// "stats" — odesláno každou sekundu
+// "stats" — odesláno každou sekundu + ihned po připojení klienta
 {
   "fps": 24.8,
   "total_frames": 1500,
   "total_detections": 312,
   "uptime_seconds": 60.3,
-  "status": "running"
+  "status": "streaming"
 }
 ```
 
@@ -183,12 +198,16 @@ output/
 ```bash
 cd vdashboard
 npm install
-
-cp .env.example .env             # uprav VITE_PROCESSOR_URL dle potřeby
 npm run dev
 ```
 
 Otevři **http://localhost:5173**
+
+Proměnnou `VITE_PROCESSOR_URL` lze nastavit v souboru `.env.local` v adresáři `vdashboard/` (ve vývoji ji Vite proxy nahrazuje automaticky):
+
+```env
+VITE_PROCESSOR_URL=http://localhost:8000
+```
 
 Sestavení pro produkci:
 
@@ -222,9 +241,11 @@ vstreamer  ──── RTSP (H.264) ────►  vprocessor
 
 ## Přehled portů
 
-| Služba | Protokol | Port | URL |
-|--------|----------|------|-----|
-| vstreamer | RTSP | 8554 | `rtsp://localhost:8554/live` |
+| Služba | Protokol | Port | URL / poznámka |
+|--------|----------|------|----------------|
+| vstreamer | RTSP/TCP | 8554 | `rtsp://localhost:8554/live` |
+| vstreamer | UDP RTP | 8556 | UDP transport pro RTP pakety |
+| vstreamer | UDP RTCP | 8557 | UDP transport pro RTCP pakety |
 | vprocessor | HTTP / WS | 8000 | `http://localhost:8000` |
 | vdashboard | HTTP | 3000 | `http://localhost:3000` |
 
@@ -252,7 +273,6 @@ vision-stream-system/
 │   ├── config.py
 │   ├── requirements.txt
 │   ├── Dockerfile
-│   ├── .env.example
 │   └── README.md
 └── vdashboard/                 ← React dashboard
     ├── src/
@@ -271,7 +291,6 @@ vision-stream-system/
     ├── vite.config.ts
     ├── Dockerfile
     ├── nginx.conf
-    ├── .env.example
     └── README.md
 ```
 
@@ -284,6 +303,12 @@ Protože `vprocessor` čte standardní RTSP URL, lze `vstreamer` zcela nahradit 
 ```env
 # .env nebo docker-compose override
 RTSP_URL=rtsp://admin:heslo@192.168.1.100:554/stream
+```
+
+Pokud kamera vysílá přes UDP a dochází k artefaktům, přepni transport na TCP:
+
+```env
+RTSP_TRANSPORT=tcp
 ```
 
 Žádné další změny nejsou potřeba.

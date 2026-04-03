@@ -1,95 +1,91 @@
 # vdashboard
 
-Real-time video monitoring dashboard for the Vision Stream System.
+React webový dashboard pro real-time monitorování videa v rámci Vision Stream System.
 
-Built with **React 18 + TypeScript + Vite + Tailwind CSS**.
+Postaven na **React 18 + TypeScript + Vite + Tailwind CSS**.
 
-## Features
+## Co zobrazuje
 
-- 📹 Live MJPEG video stream from `vprocessor`
-- 📡 Real-time detection metadata via Socket.IO
-- 📊 Live statistics (FPS, person count, total detections, uptime)
-- 🌙 Clean dark-themed UI
+- 📹 Živý MJPEG video stream ze služby `vprocessor`
+- 📡 Real-time metadata detekcí přes Socket.IO (události `detection`, `stats`)
+- 📊 Statistiky: FPS, počet osob, celkový počet detekcí, uptime
+- 🌙 Responzivní dark UI (mobilní i desktop)
 
-## Prerequisites
+## Požadavky
 
 - Node.js 18+
-- A running instance of `vprocessor` (default: `http://localhost:8000`)
+- Běžící instance služby `vprocessor` (výchozí: `http://localhost:8000`)
 
-## Development
+## Lokální vývoj
 
-```sh
+```bash
+cd vdashboard
 npm install
 npm run dev
 ```
 
-The dashboard will be available at [http://localhost:5173](http://localhost:5173).
+Dashboard bude dostupný na [http://localhost:5173](http://localhost:5173).
 
-The Vite dev server automatically proxies the following paths to `vprocessor`:
+Vývojový server automaticky přesměrovává tyto cesty na `vprocessor`:
 
-| Path | Target |
-|---|---|
+| Cesta | Cíl |
+|-------|-----|
 | `/stream` | `http://localhost:8000` |
 | `/socket.io` | `http://localhost:8000` (WebSocket) |
 | `/api` | `http://localhost:8000` |
 
-## Configuration
+## Konfigurace
 
-Copy `.env.example` to `.env.local` and adjust as needed:
+| Proměnná | Výchozí | Popis |
+|----------|---------|-------|
+| `VITE_PROCESSOR_URL` | `http://localhost:8000` | URL služby `vprocessor` |
 
-```sh
-cp .env.example .env.local
-```
+Proměnné lze nastavit v souboru `.env.local` v adresáři `vdashboard/`.
 
-| Variable | Default | Description |
-|---|---|---|
-| `VITE_PROCESSOR_URL` | `http://localhost:8000` | Base URL of the `vprocessor` service |
+> Ve vývoji zajišťuje směrování Vite proxy, `VITE_PROCESSOR_URL` je potřeba pouze při přímém připojení na vzdálený server (např. staging) bez použití proxy.
 
-> In development the Vite proxy handles routing, so `VITE_PROCESSOR_URL` is
-> only needed when you want to point directly at a remote processor without the
-> proxy (e.g. a staging server).
+## Produkční sestavení
 
-## Production Build
-
-```sh
-npm run build       # outputs to dist/
-npm run preview     # preview the production build locally
+```bash
+npm run build      # výstup do dist/
+npm run preview    # lokální náhled produkčního sestavení
 ```
 
 ## Docker
 
-Build and run the containerised dashboard (requires the `vprocessor` container
-to be reachable as `vprocessor` on the same Docker network):
-
-```sh
+```bash
 docker build -t vdashboard .
-docker run -p 80:80 vdashboard
+docker run -p 3000:80 vdashboard
 ```
 
-Or use the root `docker-compose.yml` which wires everything up automatically:
+Nebo přes kořenový `docker-compose.yml`, který automaticky propojí všechny služby:
 
-```sh
+```bash
 docker compose up --build
 ```
 
-The dashboard will be served by nginx on port **80**.
+Dashboard bude dostupný na [http://localhost:3000](http://localhost:3000) — uvnitř kontejneru běží nginx na portu 80.
 
-## Project Structure
+## Architektura Socket.IO připojení
 
-```
+Socket.IO klient je implementován jako modul-level singleton (`_socket`) v `useSocket.ts`, nikoliv uvnitř React efektu. Tím se zabraňuje nežádoucímu odpojení a reconnectu při React 18 StrictMode (dvojité volání `useEffect`). Hook `useSocket` pouze registruje a odregistruje event listenery — `socket.disconnect()` nikdy nevolá.
+
+## Struktura projektu
+
+```text
 vdashboard/
 ├── public/
 ├── src/
 │   ├── components/
-│   │   ├── Header.tsx          # Top bar with title, clock, connection status
-│   │   ├── VideoStream.tsx     # MJPEG <img> with overlay states
-│   │   ├── StatsPanel.tsx      # FPS / frames / detections / uptime cards
-│   │   └── DetectionPanel.tsx  # Person count + per-detection confidence bars
+│   │   ├── Header.tsx          # horní lišta s názvem, hodinami, stavem připojení
+│   │   ├── VideoStream.tsx     # MJPEG <img> s overlay stavy
+│   │   ├── StatsPanel.tsx      # karty FPS / snímky / detekce / uptime
+│   │   └── DetectionPanel.tsx  # počet osob + confidence bary
 │   ├── hooks/
-│   │   └── useSocket.ts        # Socket.IO connection + event handling
-│   ├── types.ts                # Shared TypeScript interfaces
-│   ├── App.tsx                 # Root layout
-│   ├── index.css               # Tailwind directives + base styles
+│   │   └── useSocket.ts        # Socket.IO singleton + obsluha událostí
+│   ├── types.ts                # sdílená TypeScript rozhraní
+│   ├── App.tsx                 # root layout
+│   ├── index.css               # Tailwind direktivy + základní styly
 │   └── main.tsx                # React 18 entry point
 ├── index.html
 ├── vite.config.ts
@@ -98,6 +94,5 @@ vdashboard/
 ├── tsconfig.json
 ├── tsconfig.node.json
 ├── Dockerfile
-├── nginx.conf
-└── .env.example
+└── nginx.conf
 ```
