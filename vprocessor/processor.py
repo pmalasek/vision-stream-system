@@ -39,6 +39,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -220,10 +221,13 @@ class VideoProcessor:
             max_workers=1, thread_name_prefix="grabber"
         )
 
-        # Poslední surový snímek sdílený mezi grabberem a zpracovatelským vláknem.
-        # Chráněn _raw_frame_lock; vždy se přepíše nejnovějším snímkem (starý
-        # se zahodí, pokud jej zpracovatelské vlákno ještě nestihlo vyzvednout).
-        self._latest_raw_frame: np.ndarray | None = None
+        # Bounded FIFO fronta surových snímků sdílená mezi grabberem a
+        # zpracovatelským vláknem. Krátká fronta pomáhá absorbovat krátkodobý
+        # jitter bez viditelných skoků v pohybu; při zaplnění zahodí nejstarší
+        # snímek a tím drží latenci pod kontrolou.
+        self._raw_frame_queue: deque[np.ndarray] = deque(
+            maxlen=max(1, self.config.RAW_FRAME_QUEUE_SIZE)
+        )
         self._raw_frame_lock = threading.Lock()
 
         # Nastavuje grabber po každém novém uloženém snímku; maže zpracovatelské
@@ -491,7 +495,7 @@ class VideoProcessor:
                 # Starý snímek se jednoduše zahodí, pokud jej procesor nestačil
                 # vyzvednout – vždy chceme zpracovávat co nejčerstvější obraz.
                 with self._raw_frame_lock:
-                    self._latest_raw_frame = frame
+                    self._raw_frame_queue.append(frame)
                 # Probuzení zpracovatelského vlákna, aby vědělo o novém snímku.
                 self._raw_frame_event.set()
 
@@ -573,9 +577,17 @@ class VideoProcessor:
                 # Vynulování události, abychom čekali na skutečně nový snímek.
                 self._raw_frame_event.clear()
 
-                # Vyzvednutí nejnovějšího snímku pod zámkem.
+                # Vyzvednutí nejstaršího čekajícího snímku pod zámkem (FIFO).
                 with self._raw_frame_lock:
-                    frame = self._latest_raw_frame
+                    if self._raw_frame_queue:
+                        frame = self._raw_frame_queue.popleft()
+                    else:
+                        frame = None
+
+                    # Pokud po odebrání žádný snímek nezbývá, event shodíme.
+                    # Jinak jej necháme nastavený, aby další iterace neblokovala.
+                    if not self._raw_frame_queue:
+                        self._raw_frame_event.clear()
 
                 # Pokud není snímek k dispozici nebo pipeline končí, přeskočíme.
                 if frame is None or not self.running:

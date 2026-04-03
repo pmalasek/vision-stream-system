@@ -108,6 +108,10 @@ class Config:
     # 1 = flush každého snímku (nejbezpečnější, ale pomalejší).
     METADATA_FLUSH_EVERY: int = int(os.getenv("METADATA_FLUSH_EVERY", "1"))
 
+    # Velikost FIFO fronty raw frame mezi grabberem a processing vláknem.
+    # Vyšší hodnota zmenšuje trhání při krátkodobém jitteru, ale zvyšuje latenci.
+    RAW_FRAME_QUEUE_SIZE: int = int(os.getenv("RAW_FRAME_QUEUE_SIZE", "8"))
+
     # Povolit průběžné ukládání výstupů (MP4 + JSONL) na disk.
     # Pro čistý výkonový benchmark lze nastavit false.
     RECORD_OUTPUT: bool = _env_bool("RECORD_OUTPUT", True)
