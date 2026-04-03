@@ -63,6 +63,9 @@ export default defineConfig({
        */
       "/stream": "http://localhost:8000",
 
+      // Proxy pro HLS playlist + segmenty
+      "/hls": "http://localhost:8000",
+
       /**
        * Proxy pro Socket.IO (real-time stavové události).
        *

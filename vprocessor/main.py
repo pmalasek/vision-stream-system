@@ -19,10 +19,13 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
 from fractions import Fraction
+from pathlib import Path
 
 import av
 import cv2
@@ -34,6 +37,7 @@ from detector import PersonDetector
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from processor import VideoProcessor
 from recorder import VideoRecorder
@@ -92,6 +96,11 @@ _connected_clients: int = 0
 # Aktivní WebRTC peer spojení (pc_id -> session).
 _webrtc_sessions: dict[str, dict] = {}
 
+# HLS ffmpeg proces + supervisor task
+_hls_process: subprocess.Popen | None = None
+_hls_task: asyncio.Task | None = None
+_hls_stop_event: asyncio.Event | None = None
+
 # Reference na běžící instanci uvicorn.Server.
 # Nastavuje ji __main__ entry point PŘED voláním server.run(), takže
 # generátor MJPEG streamu může číst atribut server.should_exit a sám
@@ -100,6 +109,137 @@ _webrtc_sessions: dict[str, dict] = {}
 # zůstane None a generátor se spolehne na běžnou nekonečnou smyčku
 # (stále přerušitelnou zrušením asyncio tasku při force-exit).
 _uvicorn_server = None  # uvicorn.Server | None
+
+
+def _ensure_hls_dir() -> Path:
+    """Vytvoří HLS output adresář a vrátí jeho Path."""
+    hls_dir = Path(config.HLS_OUTPUT_DIR)
+    hls_dir.mkdir(parents=True, exist_ok=True)
+    return hls_dir
+
+
+def _cleanup_hls_files(hls_dir: Path) -> None:
+    """Smaže staré HLS playlisty/segmenty při restartu služby."""
+    for pattern in ("*.m3u8", "*.ts", "*.m4s", "*.mp4"):
+        for item in hls_dir.glob(pattern):
+            with contextlib.suppress(Exception):
+                item.unlink()
+
+
+def _build_hls_ffmpeg_cmd(hls_dir: Path) -> list[str]:
+    """Sestaví ffmpeg command pro low-latency HLS transcode."""
+    source_url = config.HLS_SOURCE_URL.strip() or config.RTSP_URL
+    segment_time = max(0.5, float(config.HLS_SEGMENT_TIME))
+    list_size = max(3, int(config.HLS_LIST_SIZE))
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y"]
+
+    if source_url.startswith("rtsp://"):
+        cmd += [
+            "-rtsp_transport",
+            config.RTSP_TRANSPORT,
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-i",
+            source_url,
+        ]
+    else:
+        cmd += ["-i", source_url]
+
+    cmd += [
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-tune",
+        "zerolatency",
+        "-pix_fmt",
+        "yuv420p",
+        "-g",
+        "30",
+        "-keyint_min",
+        "30",
+        "-sc_threshold",
+        "0",
+        "-b:v",
+        config.HLS_VIDEO_BITRATE,
+        "-maxrate",
+        config.HLS_MAXRATE,
+        "-bufsize",
+        config.HLS_BUFSIZE,
+        "-f",
+        "hls",
+        "-hls_time",
+        str(segment_time),
+        "-hls_list_size",
+        str(list_size),
+        "-hls_allow_cache",
+        "0",
+        "-hls_flags",
+        "delete_segments+append_list+independent_segments+omit_endlist+program_date_time",
+        "-hls_segment_filename",
+        str(hls_dir / "segment_%06d.ts"),
+        str(hls_dir / "stream.m3u8"),
+    ]
+    return cmd
+
+
+def _start_hls_process() -> subprocess.Popen:
+    """Spustí ffmpeg proces generující HLS playlist/segmenty."""
+    hls_dir = _ensure_hls_dir()
+    _cleanup_hls_files(hls_dir)
+    cmd = _build_hls_ffmpeg_cmd(hls_dir)
+    logger.info("Starting HLS ffmpeg pipeline …")
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=os.environ.copy(),
+    )
+
+
+def _stop_hls_process(proc: subprocess.Popen | None) -> None:
+    """Korektně ukončí ffmpeg HLS proces."""
+    if proc is None:
+        return
+
+    if proc.poll() is not None:
+        return
+
+    with contextlib.suppress(Exception):
+        proc.terminate()
+        proc.wait(timeout=3)
+
+    if proc.poll() is None:
+        with contextlib.suppress(Exception):
+            proc.kill()
+
+
+async def _hls_supervisor() -> None:
+    """Dohlíží na běh ffmpeg HLS procesu a restartuje jej při pádu."""
+    global _hls_process, _hls_stop_event
+
+    if _hls_stop_event is None:
+        _hls_stop_event = asyncio.Event()
+
+    while not _hls_stop_event.is_set():
+        if _hls_process is None or _hls_process.poll() is not None:
+            if _hls_process is not None and _hls_process.stderr is not None:
+                tail = _hls_process.stderr.read()
+                if tail:
+                    logger.warning("HLS ffmpeg exited; stderr: %s", tail.strip()[-500:])
+
+            try:
+                _hls_process = _start_hls_process()
+            except Exception as exc:
+                logger.error("Failed to start HLS ffmpeg: %s", exc)
+
+        await asyncio.sleep(1.0)
 
 
 class WebRTCOffer(BaseModel):
@@ -231,7 +371,7 @@ async def lifespan(app: FastAPI):
         - V případě překročení timeoutu vynucené zrušení tasku.
         - Konzumace výsledku / výjimky tasku, aby asyncio nepsal varování.
     """
-    global processor, _processor_task, _start_time
+    global processor, _processor_task, _start_time, _hls_task, _hls_stop_event
 
     logger.info("=== vprocessor starting up ===")
 
@@ -278,6 +418,11 @@ async def lifespan(app: FastAPI):
     # běží souběžně s obsluhou požadavků po celou dobu života aplikace.
     _processor_task = asyncio.create_task(processor.start(), name="video-processor")
 
+    if config.ENABLE_HLS:
+        _ensure_hls_dir()
+        _hls_stop_event = asyncio.Event()
+        _hls_task = asyncio.create_task(_hls_supervisor(), name="hls-supervisor")
+
     # ── aplikace běží, obsluha požadavků ──────────────────────────────
     yield
 
@@ -311,6 +456,18 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(Exception):
             await _processor_task
 
+    if _hls_stop_event is not None:
+        _hls_stop_event.set()
+
+    if _hls_task is not None:
+        if not _hls_task.done():
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(_hls_task, timeout=4.0)
+        with contextlib.suppress(Exception):
+            await _hls_task
+
+    _stop_hls_process(_hls_process)
+
     # Uzavření všech aktivních WebRTC peer session při shutdownu.
     for pc_id in list(_webrtc_sessions.keys()):
         await _cleanup_webrtc_session(pc_id)
@@ -329,6 +486,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+_ensure_hls_dir()
+app.mount("/hls", StaticFiles(directory=config.HLS_OUTPUT_DIR), name="hls")
 
 # --- CORS middleware ---
 # Povoluje cross-origin požadavky ze všech origins, s libovolnými metodami

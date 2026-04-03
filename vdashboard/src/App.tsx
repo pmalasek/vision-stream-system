@@ -55,14 +55,22 @@ const PROCESSOR_BASE =
  */
 const DIRECT_STREAM_URL = import.meta.env.VITE_STREAM_URL as string | undefined;
 
+/** Volitelná přímá URL HLS playlistu (m3u8). */
+const DIRECT_HLS_URL = import.meta.env.VITE_HLS_URL as string | undefined;
+
 /** Volitelná přímá URL pro WebRTC signaling endpoint backendu. */
 const WEBRTC_BASE_URL =
   (import.meta.env.VITE_WEBRTC_URL as string | undefined) ?? PROCESSOR_BASE;
 
 /** Zapíná WebRTC přehrávání videa (výchozí true). */
-const USE_WEBRTC =
-  (import.meta.env.VITE_USE_WEBRTC as string | undefined)?.toLowerCase() !==
-  "false";
+const VIDEO_MODE =
+  ((import.meta.env.VITE_VIDEO_MODE as string | undefined)?.toLowerCase() as
+    | "hls"
+    | "webrtc"
+    | "mjpeg"
+    | undefined) ?? "hls";
+
+const USE_WEBRTC = VIDEO_MODE === "webrtc";
 
 /**
  * Plná URL adresa MJPEG video streamu.
@@ -72,6 +80,7 @@ const USE_WEBRTC =
  * pro tag `<img>`, který MJPEG stream přehrává nativně v prohlížeči.
  */
 const STREAM_URL = DIRECT_STREAM_URL ?? `${PROCESSOR_BASE}/stream`;
+const HLS_URL = DIRECT_HLS_URL ?? `${PROCESSOR_BASE}/hls/stream.m3u8`;
 
 /**
  * Kořenová komponenta aplikace vdashboard.
@@ -182,7 +191,9 @@ export default function App() {
            */}
           <div className="lg:col-span-2 flex flex-col lg:min-h-0">
             <VideoStream
+              videoMode={VIDEO_MODE}
               streamUrl={STREAM_URL}
+              hlsUrl={HLS_URL}
               webrtcUrl={WEBRTC_BASE_URL}
               useWebRTC={USE_WEBRTC}
               onFrameMeta={setVideoFrameMeta}

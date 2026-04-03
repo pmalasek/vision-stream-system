@@ -12,6 +12,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
 import type { FrameMetaEvent, StatsEvent } from "../types";
 
 /**
@@ -24,7 +25,9 @@ import type { FrameMetaEvent, StatsEvent } from "../types";
  *                          nebo null dokud nepřijde první událost.
  */
 interface VideoStreamProps {
+  videoMode?: "hls" | "webrtc" | "mjpeg";
   streamUrl: string;
+  hlsUrl?: string;
   webrtcUrl?: string;
   useWebRTC?: boolean;
   onFrameMeta?: (meta: FrameMetaEvent) => void;
@@ -131,7 +134,9 @@ const STATUS_OVERLAY: Record<
  * začne odesílat data.
  */
 const VideoStream: React.FC<VideoStreamProps> = ({
+  videoMode = "hls",
   streamUrl,
+  hlsUrl,
   webrtcUrl,
   useWebRTC = true,
   onFrameMeta,
@@ -155,6 +160,9 @@ const VideoStream: React.FC<VideoStreamProps> = ({
   const [webrtcState, setWebrtcState] = useState<
     "idle" | "connecting" | "live" | "error"
   >("idle");
+  const [hlsState, setHlsState] = useState<"idle" | "connecting" | "live" | "error">(
+    "idle",
+  );
   const videoRef = useRef<HTMLVideoElement>(null);
 
   /**
@@ -207,7 +215,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({
   );
 
   useEffect(() => {
-    if (!useWebRTC) return;
+    if (!useWebRTC || videoMode !== "webrtc") return;
 
     const signalingBase = (webrtcUrl ?? window.location.origin).replace(/\/$/, "");
     let closed = false;
@@ -294,7 +302,73 @@ const VideoStream: React.FC<VideoStreamProps> = ({
       }
       setWebrtcState("idle");
     };
-  }, [handleFrameMetaMessage, useWebRTC, webrtcUrl]);
+  }, [handleFrameMetaMessage, useWebRTC, webrtcUrl, videoMode]);
+
+  useEffect(() => {
+    if (videoMode !== "hls") return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    const src = hlsUrl ?? `${window.location.origin}/hls/stream.m3u8`;
+    let destroyed = false;
+    let hls: Hls | null = null;
+
+    setHlsState("connecting");
+
+    const onLoadedData = () => {
+      if (!destroyed) setHlsState("live");
+    };
+
+    const onError = () => {
+      if (!destroyed) setHlsState("error");
+    };
+
+    video.addEventListener("loadeddata", onLoadedData);
+    video.addEventListener("error", onError);
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = src;
+      void video.play().catch(() => {
+        // autoplay policy
+      });
+    } else if (Hls.isSupported()) {
+      hls = new Hls({
+        lowLatencyMode: true,
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 6,
+        maxLiveSyncPlaybackRate: 1.5,
+      });
+
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (destroyed) return;
+        if (data.fatal) {
+          setHlsState("error");
+        }
+      });
+
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        void video.play().catch(() => {
+          // autoplay policy
+        });
+      });
+    } else {
+      setHlsState("error");
+    }
+
+    return () => {
+      destroyed = true;
+      video.removeEventListener("loadeddata", onLoadedData);
+      video.removeEventListener("error", onError);
+      if (hls) {
+        hls.destroy();
+      }
+      video.removeAttribute("src");
+      video.load();
+      setHlsState("idle");
+    };
+  }, [hlsUrl, videoMode]);
 
   /**
    * isLive – true pouze tehdy, když MJPEG pipe aktivně dodává živé snímky.
@@ -308,7 +382,12 @@ const VideoStream: React.FC<VideoStreamProps> = ({
    * Pokud libovolná podmínka selže, stream není považován za živý a zobrazí
    * se buď no-signal nebo frozen-frame overlay.
    */
-  const videoReady = useWebRTC ? webrtcState === "live" : !imgError && imgLoaded;
+  const videoReady =
+    videoMode === "webrtc"
+      ? webrtcState === "live"
+      : videoMode === "hls"
+        ? hlsState === "live"
+        : !imgError && imgLoaded;
   const isLive = isConnected && videoReady && stats?.status === "streaming";
 
   /**
@@ -323,9 +402,12 @@ const VideoStream: React.FC<VideoStreamProps> = ({
    * V tomto stavu je `<img>` element neviditelný (opacity-0), aby nezabíral
    * vizuální prostor, a celou plochu pokryje tmavý overlay.
    */
-  const showNoSignal = useWebRTC
-    ? !isConnected || webrtcState === "connecting" || webrtcState === "error"
-    : !isConnected || imgError || !imgLoaded;
+  const showNoSignal =
+    videoMode === "webrtc"
+      ? !isConnected || webrtcState === "connecting" || webrtcState === "error"
+      : videoMode === "hls"
+        ? !isConnected || hlsState === "connecting" || hlsState === "error"
+        : !isConnected || imgError || !imgLoaded;
 
   /**
    * showFrozenOverlay – true když máme snímek, ale stream není živý.
@@ -339,6 +421,13 @@ const VideoStream: React.FC<VideoStreamProps> = ({
    * Podmínka: máme snímek (není showNoSignal) ale nejsme živí (!isLive).
    */
   const showFrozenOverlay = !showNoSignal && !isLive;
+
+  const hasStreamError =
+    videoMode === "webrtc"
+      ? webrtcState === "error"
+      : videoMode === "hls"
+        ? hlsState === "error"
+        : imgError;
 
   /** Zkrácený alias pro aktuální stav procesoru; null před prvním stats eventem. */
   const processorStatus = stats?.status ?? null;
@@ -367,17 +456,17 @@ const VideoStream: React.FC<VideoStreamProps> = ({
         <div className="flex items-center gap-2">
           <span
             className={`inline-block w-2.5 h-2.5 rounded-full ${
-              isConnected && !imgError
+              isConnected && !hasStreamError
                 ? "bg-green-400 shadow-[0_0_6px_2px_rgba(74,222,128,0.5)]"
                 : "bg-red-500 shadow-[0_0_6px_2px_rgba(239,68,68,0.45)]"
             }`}
           />
           <span
             className={`text-xs font-medium ${
-              isConnected && !imgError ? "text-green-400" : "text-red-400"
+              isConnected && !hasStreamError ? "text-green-400" : "text-red-400"
             }`}
           >
-            {isConnected && !imgError ? "Connected" : "Disconnected"}
+            {isConnected && !hasStreamError ? "Connected" : "Disconnected"}
           </span>
         </div>
       </div>
@@ -401,7 +490,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                                    zešednutý a poloprůhledný jako „ghosting"
             opacity-100          → isLive: plně viditelný živý obraz
         */}
-        {useWebRTC ? (
+        {videoMode === "webrtc" || videoMode === "hls" ? (
           <video
             ref={videoRef}
             autoPlay
@@ -453,7 +542,13 @@ const VideoStream: React.FC<VideoStreamProps> = ({
         */}
         {showNoSignal && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-gray-950">
-            {(useWebRTC ? webrtcState === "connecting" : isConnected && !imgError) ? (
+            {(
+              videoMode === "webrtc"
+                ? webrtcState === "connecting"
+                : videoMode === "hls"
+                  ? hlsState === "connecting"
+                  : isConnected && !imgError
+            ) ? (
               /* Větev „loading": jsme připojeni, čekáme na první snímek */
               <>
                 <svg
@@ -477,7 +572,11 @@ const VideoStream: React.FC<VideoStreamProps> = ({
                   />
                 </svg>
                 <p className="text-gray-400 text-sm font-medium animate-pulse">
-                  {useWebRTC ? "Establishing WebRTC…" : "Loading stream…"}
+                  {videoMode === "webrtc"
+                    ? "Establishing WebRTC…"
+                    : videoMode === "hls"
+                      ? "Loading HLS…"
+                      : "Loading stream…"}
                 </p>
               </>
             ) : (

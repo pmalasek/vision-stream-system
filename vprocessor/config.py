@@ -126,6 +126,31 @@ class Config:
     # Povolit WebRTC video endpoint (/webrtc/offer).
     ENABLE_WEBRTC: bool = _env_bool("ENABLE_WEBRTC", True)
 
+    # Povolit HLS generaci streamu (playlist + segmenty) pro browser přehrávání.
+    ENABLE_HLS: bool = _env_bool("ENABLE_HLS", True)
+
+    # Adresář, kam ffmpeg zapisuje HLS playlist a segmenty.
+    HLS_OUTPUT_DIR: str = os.getenv("HLS_OUTPUT_DIR", "./hls")
+
+    # Volitelný explicitní zdroj pro HLS transcode.
+    # Pokud není nastaven, použije se RTSP_URL.
+    HLS_SOURCE_URL: str = os.getenv("HLS_SOURCE_URL", "")
+
+    # Délka jednoho HLS segmentu v sekundách (nižší hodnota = nižší latence).
+    HLS_SEGMENT_TIME: float = float(os.getenv("HLS_SEGMENT_TIME", "1.0"))
+
+    # Počet segmentů držených v playlistu.
+    HLS_LIST_SIZE: int = int(os.getenv("HLS_LIST_SIZE", "6"))
+
+    # Cílový video bitrate pro HLS transcode.
+    HLS_VIDEO_BITRATE: str = os.getenv("HLS_VIDEO_BITRATE", "2200k")
+
+    # Max bitrate pro VBV omezení.
+    HLS_MAXRATE: str = os.getenv("HLS_MAXRATE", "2800k")
+
+    # Velikost VBV bufferu.
+    HLS_BUFSIZE: str = os.getenv("HLS_BUFSIZE", "4400k")
+
     # Povolit průběžné ukládání výstupů (MP4 + JSONL) na disk.
     # Pro čistý výkonový benchmark lze nastavit false.
     RECORD_OUTPUT: bool = _env_bool("RECORD_OUTPUT", True)

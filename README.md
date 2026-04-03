@@ -187,6 +187,7 @@ Dostupné API endpointy:
 | Metoda | Cesta | Popis |
 |--------|-------|-------|
 | `GET` | `/stream` | MJPEG video stream |
+| `GET` | `/hls/stream.m3u8` | LL-HLS playlist (segmenty pod `/hls/*.ts`) |
 | `POST` | `/webrtc/offer` | WebRTC signaling endpoint (SDP offer/answer) |
 | `GET` | `/health` | Zdravotní stav služby + statistiky |
 | `GET` | `/api/stats` | Aktuální statistiky zpracování |
