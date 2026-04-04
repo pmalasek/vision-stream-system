@@ -669,18 +669,21 @@ class VideoProcessor:
 
                 # ── Detekce osob (volitelně pouze každý N-tý snímek) ───────
                 # detector.detect() se volá jen na každém N-tém snímku.
-                # U mezilehlých snímků posíláme do UI čistý obraz bez boxů.
+                # U mezilehlých snímků pouze překreslíme poslední známé boxy.
                 detect_start_perf = time.perf_counter()
                 do_detect = detection_enabled and (((self.frame_count - 1) % detect_every_n) == 0)
                 if do_detect:
                     annotated_frame, detections = self.detector.detect(frame)
                     # Uložení detekcí pro HTTP endpoint /api/detections.
-                    self.latest_detections = detections
+                    self.latest_detections = list(detections)
                     # Průběžné sčítání celkového počtu detekcí od spuštění.
                     self.total_detections += len(detections)
                 else:
-                    detections = []
-                    annotated_frame = frame
+                    # Při přeskočené inferenci držíme poslední známé detekce,
+                    # aby downstream UI/consumer neblikal mezi hodnotami a nulou,
+                    # a současně je znovu vykreslíme do aktuálního snímku.
+                    detections = list(self.latest_detections)
+                    annotated_frame = self.detector.render_detections(frame, detections)
                 detect_end_perf = time.perf_counter()
 
                 # ── Kódování do JPEG a uložení ─────────────────────────────

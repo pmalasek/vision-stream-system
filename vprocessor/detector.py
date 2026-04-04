@@ -193,8 +193,6 @@ class PersonDetector:
                   a ``confidence`` (spolehlivost detekce) – vše jako float
                   (souřadnice v původní velikosti snímku).
         """
-        # Pracujeme s kopií snímku, aby původní data zůstala nezměněna.
-        annotated = frame.copy()
         frame_height, frame_width = frame.shape[:2]
 
         # Seznam pro shromáždění metadat všech detekovaných osob v tomto snímku.
@@ -269,16 +267,40 @@ class PersonDetector:
                     }
                 )
 
-                # Vykreslení ohraničujícího rámečku detekované osoby do anotovaného snímku.
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, BOX_THICKNESS)
-
-                # Sestavení textového popisku se spolehlivostí v procentech.
-                label = f"Person {conf * 100:.1f}%"
-
-                # Vykreslení popisku (s barevným pozadím) nad rámeček.
-                self._draw_label(annotated, label, x1, y1)
+        # Vizualizace je oddělena od inference – stejný renderer lze
+        # použít i pro „stale" detekce mezi dvěma inferencemi.
+        annotated = self.render_detections(frame, detections)
 
         return annotated, detections
+
+    def render_detections(self, frame: np.ndarray, detections: list[dict]) -> np.ndarray:
+        """Vykreslí zadané detekce do kopie snímku bez spuštění inference.
+
+        Args:
+            frame: Snímek ve formátu BGR jako pole NumPy.
+            detections: Seznam detekcí ve formátu slovníků s klíči
+                ``x1``, ``y1``, ``x2``, ``y2``, volitelně ``confidence``.
+
+        Returns:
+            Kopie vstupního snímku s vykreslenými ohraničujícími rámečky.
+        """
+        annotated = frame.copy()
+
+        for det in detections:
+            x1 = int(det.get("x1", 0))
+            y1 = int(det.get("y1", 0))
+            x2 = int(det.get("x2", 0))
+            y2 = int(det.get("y2", 0))
+            conf = float(det.get("confidence", 0.0))
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), BOX_COLOR, BOX_THICKNESS)
+
+            # Zachování stávajícího chování: do streamu kreslíme pouze boxy.
+            # Pokud bude třeba, lze popisky aktivovat jedním řádkem níže.
+            # label = f"Person {conf * 100:.1f}%"
+            # self._draw_label(annotated, label, x1, y1)
+
+        return annotated
 
     # ------------------------------------------------------------------
     # Privátní pomocné metody (Private helpers)
