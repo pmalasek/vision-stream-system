@@ -73,7 +73,7 @@ try:
     if hasattr(cv2, "setLogLevel"):
         cv2.setLogLevel(2)
     elif hasattr(cv2, "utils") and hasattr(cv2.utils, "logging"):
-        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)  # type: ignore
 except Exception:
     # Log-level nastavení je best-effort; nesmí shodit import celého modulu.
     pass
@@ -671,7 +671,9 @@ class VideoProcessor:
                 # detector.detect() se volá jen na každém N-tém snímku.
                 # U mezilehlých snímků pouze překreslíme poslední známé boxy.
                 detect_start_perf = time.perf_counter()
-                do_detect = detection_enabled and (((self.frame_count - 1) % detect_every_n) == 0)
+                do_detect = detection_enabled and (
+                    ((self.frame_count - 1) % detect_every_n) == 0
+                )
                 if do_detect:
                     annotated_frame, detections = self.detector.detect(frame)
                     # Uložení detekcí pro HTTP endpoint /api/detections.
